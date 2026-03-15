@@ -68,79 +68,50 @@ def normalize_with_ffmpeg(file_bytes):
             except Exception:
                 pass
 
+try:
+    import noisereduce as nr
+    HAS_NR = True
+except Exception:
+    HAS_NR = False
+
 @shared_task(bind=True)
-def process_audio_file(self, audiofile_id):
-    """
-    Задача:
-    - безопасно загрузить файл
-    - попытаться использовать pydub для обработки (если доступен)
-    - иначе использовать ffmpeg/ffprobe fallback
-    - сохранить обработанный файл и duration
-    """
+def process_audio_file(self, audiofile_id, mode='denoise'):
+    af = AudioFile.objects.get(id=audiofile_id)
+    af.status = 'processing'
+    af.save(update_fields=['status'])
+
+    src_path = af.file.path
+    tmp_wav = src_path + ".tmp.wav"
+
+    # Конвертируем в WAV 16k mono
+    cmd = [
+        "ffmpeg", "-y", "-i", src_path,
+        "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
+        tmp_wav
+    ]
+    subprocess.run(cmd, check=True)
+
+    data, sr = sf.read(tmp_wav)
+    if data.ndim > 1:
+        data = np.mean(data, axis=1)
+
+    if mode == 'denoise' and HAS_NR:
+        reduced = nr.reduce_noise(y=data, sr=sr)
+    else:
+        reduced = data
+
+    out_name = f"processed_{af.id}.wav"
+    out_wav = os.path.join(settings.MEDIA_ROOT, out_name)
+    sf.write(out_wav, reduced, sr, subtype='PCM_16')
+
+    af.file.name = out_name
+    af.duration = len(reduced) / sr
+    af.status = 'done'
+    af.save(update_fields=['file', 'duration', 'status'])
+
     try:
-        audio = AudioFile.objects.get(id=audiofile_id)
-    except AudioFile.DoesNotExist:
-        logger.error("AudioFile %s not found", audiofile_id)
-        return {"status": "not_found"}
+        os.remove(tmp_wav)
+    except OSError:
+        pass
 
-    file_field = audio.file
-    if not file_field:
-        logger.error("AudioFile %s has no file", audiofile_id)
-        return {"status": "no_file"}
-
-    # Считать файл в память
-    try:
-        # если локальный storage
-        if hasattr(file_field, "path") and os.path.exists(file_field.path):
-            with open(file_field.path, "rb") as f:
-                raw = f.read()
-        else:
-            raw = file_field.read()
-    except Exception as e:
-        logger.exception("Failed to read file for %s: %s", audiofile_id, e)
-        return {"status": "read_error", "error": str(e)}
-
-    # Попытка использовать pydub (если установлен)
-    try:
-        from pydub import AudioSegment
-        # pydub может определить формат по расширению
-        try:
-            sound = AudioSegment.from_file(io.BytesIO(raw))
-            duration_sec = len(sound) / 1000.0
-            # нормализация через pydub
-            target_dBFS = -20.0
-            change_in_dBFS = target_dBFS - sound.dBFS
-            normalized = sound.apply_gain(change_in_dBFS)
-            out_buf = io.BytesIO()
-            normalized.export(out_buf, format="wav")
-            out_buf.seek(0)
-            processed_bytes = out_buf.read()
-        except Exception as e:
-            logger.exception("pydub processing failed, falling back to ffmpeg: %s", e)
-            duration_sec = get_duration_with_ffprobe(raw)
-            processed_bytes = normalize_with_ffmpeg(raw)
-    except Exception as e:
-        # pydub не доступен — используем ffmpeg fallback
-        logger.info("pydub not available, using ffmpeg fallback: %s", e)
-        try:
-            duration_sec = get_duration_with_ffprobe(raw)
-            processed_bytes = normalize_with_ffmpeg(raw)
-        except Exception as e2:
-            logger.exception("ffmpeg fallback failed for %s: %s", audiofile_id, e2)
-            return {"status": "processing_error", "error": str(e2)}
-
-    # Сохранить обработанный файл
-    try:
-        filename = os.path.basename(file_field.name)
-        name_root, _ = os.path.splitext(filename)
-        processed_name = f"{name_root}_processed_{int(timezone.now().timestamp())}.wav"
-        audio.file.save(processed_name, ContentFile(processed_bytes), save=False)
-        audio.duration = duration_sec
-        audio.uploaded_at = timezone.now()
-        audio.save()
-    except Exception as e:
-        logger.exception("Saving processed file failed for %s: %s", audiofile_id, e)
-        return {"status": "save_error", "error": str(e)}
-
-    logger.info("Processed audio %s duration %.2f s", audiofile_id, duration_sec)
-    return {"status": "ok", "duration": duration_sec}
+    return {'status': 'ok', 'duration': af.duration}

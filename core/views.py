@@ -88,54 +88,24 @@ class TrackViewSet(viewsets.ModelViewSet):
 
 
 class AudioFileViewSet(viewsets.ModelViewSet):
-    """
-    Загрузка/просмотр аудиофайлов.
-    Поддерживает multipart upload (file field).
-    При создании запускает фоновую задачу обработки.
-    """
-    queryset = AudioFile.objects.none()
+    queryset = AudioFile.objects.all().order_by('-uploaded_at')
     serializer_class = AudioFileSerializer
-    permission_classes = [permissions.IsAuthenticated, IsOwner]
-    parser_classes = [MultiPartParser, FormParser]
 
-    def get_queryset(self):
-        return AudioFile.objects.filter(track__project__owner=self.request.user).order_by('-uploaded_at')
-
-    @transaction.atomic
-    def create(self, request, *args, **kwargs):
-        """
-        Обычный create, но с проверкой прав на трек и запуском фоновой обработки.
-        Ожидается поле 'track' (id) и 'file' (multipart).
-        """
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        track = serializer.validated_data.get('track')
-        if track.project.owner != request.user:
-            return Response({"detail": "Трек не принадлежит вам."}, status=status.HTTP_403_FORBIDDEN)
-
-        instance = serializer.save()
-        headers = self.get_success_headers(serializer.data)
-
-        # Запуск фоновой обработки (если задача подключена)
-        if process_audio_file:
-            try:
-                process_audio_file.delay(instance.id)
-            except Exception:
-                pass
-
-        return Response(AudioFileSerializer(instance).data, status=status.HTTP_201_CREATED, headers=headers)
+    def get_serializer_context(self):
+        ctx = super().get_serializer_context()
+        ctx.update({"request": self.request})
+        return ctx
 
     @action(detail=True, methods=['post'])
-    def reprocess(self, request, pk=None):
-        """
-        Ручной триггер повторной обработки файла.
-        """
-        audio = get_object_or_404(AudioFile, pk=pk, track__project__owner=request.user)
-        if process_audio_file:
-            process_audio_file.delay(audio.id)
-            return Response({"detail": "Задача на обработку поставлена в очередь."})
-        return Response({"detail": "Фоновая обработка не настроена."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+    def process(self, request, pk=None):
+        af = self.get_object()
+        if af.status in ('processing', 'queued'):
+            return Response({'detail': 'already processing'}, status=status.HTTP_400_BAD_REQUEST)
+        af.status = 'queued'
+        af.save(update_fields=['status'])
+        mode = request.data.get('mode', 'denoise')
+        process_audio_file.delay(af.id, mode)
+        return Response({'status': 'queued'})
 
 
 class EffectChainViewSet(viewsets.ModelViewSet):

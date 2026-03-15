@@ -21,6 +21,14 @@ class AudioFile(models.Model):
     file = models.FileField(upload_to='audio/')
     duration = models.FloatField(null=True, blank=True)
     uploaded_at = models.DateTimeField(auto_now_add=True)
+    STATUS_CHOICES = [
+        ('new', 'New'),
+        ('queued', 'Queued'),
+        ('processing', 'Processing'),
+        ('done', 'Done'),
+        ('error', 'Error'),
+    ]
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='new')
 
 class EffectChain(models.Model):
     track = models.ForeignKey('Track', on_delete=models.CASCADE, related_name='effect_chains')

@@ -12,10 +12,18 @@ class UserSerializer(serializers.ModelSerializer):
         read_only_fields = ('id', 'is_staff')
 
 class AudioFileSerializer(serializers.ModelSerializer):
+    file_url = serializers.SerializerMethodField()
+
     class Meta:
         model = AudioFile
-        fields = ['id','track','file','status','duration','created_at']
-        read_only_fields = ['status','duration','created_at']
+        fields = ['id', 'track', 'file', 'file_url', 'status', 'duration', 'uploaded_at']
+        read_only_fields = ['status', 'duration', 'uploaded_at', 'file_url']
+
+    def get_file_url(self, obj):
+        request = self.context.get('request')
+        if obj.file and request:
+            return request.build_absolute_uri(obj.file.url)
+        return obj.file.url if obj.file else None
 
 class TrackSerializer(serializers.ModelSerializer):
     audio_files = AudioFileSerializer(many=True, read_only=True)
