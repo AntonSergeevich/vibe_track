@@ -14,8 +14,6 @@ class UserSerializer(serializers.ModelSerializer):
 class AudioFileSerializer(serializers.ModelSerializer):
     class Meta:
         model = AudioFile
-        fields = ['id','track','file','status','duration','created_at']
-        read_only_fields = ['status','duration','created_at']
 
 class TrackSerializer(serializers.ModelSerializer):
     audio_files = AudioFileSerializer(many=True, read_only=True)
