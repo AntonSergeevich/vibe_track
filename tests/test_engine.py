@@ -211,7 +211,8 @@ class TestFullPipeline(EngineTestCase):
         result = transform(self.track_path,
                            "ню-метал в духе Korn, drop C, скретчи, женский вокал в припеве",
                            out_dir=out_dir,
-                           options=RenderOptions(manual_lyrics="Строка раз\nСтрока два"))
+                           options=RenderOptions(manual_lyrics="Строка раз\nСтрока два",
+                                                 separation_backend="dsp", use_llm=False))
         self.assertTrue(os.path.exists(result.master_path))
         self.assertIn("guitar_rhythm", result.stem_paths)
         self.assertIn("drums", result.stem_paths)

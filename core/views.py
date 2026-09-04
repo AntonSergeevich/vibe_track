@@ -15,9 +15,8 @@ from rest_framework.response import Response
 from engine.arrangement import (BASS_TUNINGS, GROOVE_KEYWORDS, INSTRUMENT_CATALOG,
                                 REFERENCE_ARTISTS, TUNINGS, VOCAL_STYLE_KEYWORDS,
                                 parse_prompt)
-from engine.separation import demucs_available
+from engine.models import status as model_status
 from engine.tabs import TUNING_LABELS
-from engine.transcription import whisper_available
 
 from .models import (AudioFile, Billing, EffectChain, Project, RenderJob, Track, User,
                      VocalTake)
@@ -289,10 +288,10 @@ def capabilities(request):
         'grooves': list(GROOVE_KEYWORDS),
         'vocal_styles': list(VOCAL_STYLE_KEYWORDS),
         'references': sorted(REFERENCE_ARTISTS),
-        'backends': {
-            'demucs': demucs_available(),
-            'whisper': whisper_available(),
-        },
+        'backends': {name: {'model': info.name, 'available': info.available,
+                            'loaded': info.loaded, 'detail': info.detail,
+                            'load_seconds': info.load_seconds}
+                     for name, info in model_status().items()},
         'limits': {
             'max_upload_mb': settings.VIBETRACK_MAX_UPLOAD_MB,
             'max_duration_sec': settings.VIBETRACK['MAX_DURATION'],

@@ -56,7 +56,10 @@ def _engine_options(job: RenderJob) -> RenderOptions:
         export_format=options.get("export_format", cfg["EXPORT_FORMAT"]),
         master_loudness_db=options.get("master_loudness_db", cfg["MASTER_LOUDNESS_DB"]),
         demucs_model=cfg["DEMUCS_MODEL"],
+        separation_backend=options.get("separation_backend", cfg["SEPARATION_BACKEND"]),
         max_duration=cfg["MAX_DURATION"],
+        use_llm=options.get("use_llm", True),
+        lyrics_language=options.get("lyrics_language", "") or "",
     )
 
 

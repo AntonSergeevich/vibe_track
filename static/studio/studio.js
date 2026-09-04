@@ -22,9 +22,16 @@
   /* ---------------------------------------------------------- возможности */
   request('capabilities/').then((caps) => {
     const b = caps.backends || {};
-    $('#backends').innerHTML =
-      `Разделение дорожек: <b>${b.demucs ? 'Demucs' : 'DSP (базовое)'}</b> ·
-       Расшифровка текста: <b>${b.whisper ? 'Whisper' : 'нет — впиши текст вручную'}</b>`;
+    const badge = (info, onText, offText) => {
+      if (!info) return offText;
+      const state = info.loaded ? ' (загружена)' : '';
+      return info.available ? `${onText}: ${info.model}${state}` : offText;
+    };
+    $('#backends').innerHTML = [
+      `Разделение дорожек: <b>${badge(b.demucs, 'Demucs', 'DSP (базовое)')}</b>`,
+      `Текст песни: <b>${badge(b.whisper, 'Whisper', 'вручную')}</b>`,
+      `Разбор описания: <b>${badge(b.llm, 'Claude', 'по ключевым словам')}</b>`,
+    ].join(' · ');
     $('#refs').innerHTML = (caps.references || [])
       .map((r) => `<button type="button" class="chip">${r}</button>`).join('');
     $('#refs').addEventListener('click', (e) => {

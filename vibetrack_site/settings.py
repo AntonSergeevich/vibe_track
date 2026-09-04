@@ -152,6 +152,7 @@ VIBETRACK = {
     'EXPORT_FORMAT': os.getenv('VIBETRACK_EXPORT_FORMAT', 'wav'),   # wav | mp3 (нужен ffmpeg)
     'MAX_DURATION': float(os.getenv('VIBETRACK_MAX_DURATION', 480)),
     'DEMUCS_MODEL': os.getenv('VIBETRACK_DEMUCS_MODEL', 'htdemucs'),
+    'SEPARATION_BACKEND': os.getenv('VIBETRACK_SEPARATION_BACKEND', 'auto'),  # auto|demucs|dsp
     'WHISPER_MODEL': os.getenv('VIBETRACK_WHISPER_MODEL', 'small'),
     'MASTER_LOUDNESS_DB': float(os.getenv('VIBETRACK_MASTER_LOUDNESS_DB', -10.0)),
 }

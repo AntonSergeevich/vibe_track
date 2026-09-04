@@ -14,6 +14,7 @@ from dataclasses import dataclass, field, asdict
 from .analysis import TrackAnalysis
 from .audio_io import Audio, save
 from .chords import ChordEvent, chord_at
+from .models import ModelUnavailable, get_whisper, whisper_available
 
 logger = logging.getLogger(__name__)
 
@@ -51,37 +52,32 @@ class Lyrics:
                 "text": self.text, "lines": [l.to_dict() for l in self.lines]}
 
 
-def whisper_available() -> bool:
-    try:
-        import faster_whisper  # noqa: F401
-
-        return True
-    except Exception:
-        try:
-            import whisper  # noqa: F401
-
-            return True
-        except Exception:
-            return False
-
-
 def transcribe(vocals: Audio, language: str | None = None,
-               model_size: str | None = None) -> Lyrics:
+               model_size: str | None = None, analysis: TrackAnalysis | None = None) -> Lyrics:
     """Расшифровывает вокальную дорожку. Без Whisper вернёт пустой результат."""
-    model_size = model_size or os.getenv("VIBETRACK_WHISPER_MODEL", "small")
+    if vocals.n_samples < vocals.sr:      # меньше секунды — расшифровывать нечего
+        return Lyrics(backend="none")
     try:
-        return _transcribe_faster_whisper(vocals, language, model_size)
-    except ImportError:
-        pass
-    except Exception as exc:  # pragma: no cover
-        logger.warning("faster-whisper упал: %s", exc)
-    try:
-        return _transcribe_whisper(vocals, language, model_size)
-    except ImportError:
-        pass
-    except Exception as exc:  # pragma: no cover
-        logger.warning("whisper упал: %s", exc)
-    return Lyrics(backend="unavailable")
+        lyrics = _transcribe_faster_whisper(vocals, language, model_size)
+    except ModelUnavailable as exc:
+        logger.info("Whisper недоступен: %s", exc)
+        return Lyrics(backend="unavailable")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Whisper упал: %s", exc, exc_info=True)
+        return Lyrics(backend="unavailable")
+    if analysis is not None:
+        assign_sections(lyrics, analysis)
+    return lyrics
+
+
+def assign_sections(lyrics: "Lyrics", analysis: TrackAnalysis) -> "Lyrics":
+    """Проставляет строкам секцию трека — чтобы в песеннике были [ПРИПЕВ] и [КУПЛЕТ]."""
+    for line in lyrics.lines:
+        for section in analysis.sections:
+            if section.start <= line.start < section.end:
+                line.section = section.name
+                break
+    return lyrics
 
 
 def _tmp_wav(vocals: Audio) -> str:
@@ -91,37 +87,29 @@ def _tmp_wav(vocals: Audio) -> str:
     return save(path, vocals)
 
 
-def _transcribe_faster_whisper(vocals: Audio, language, model_size) -> Lyrics:  # pragma: no cover
-    from faster_whisper import WhisperModel
-
+def _transcribe_faster_whisper(vocals: Audio, language, model_size) -> Lyrics:
+    """Расшифровка с таймкодами по словам — из них строится текст с аккордами."""
+    model = get_whisper(model_size)          # модель кэширована на процесс
     path = _tmp_wav(vocals)
     try:
-        model = WhisperModel(model_size, device=os.getenv("VIBETRACK_WHISPER_DEVICE", "cpu"),
-                             compute_type=os.getenv("VIBETRACK_WHISPER_COMPUTE", "int8"))
-        segments, info = model.transcribe(path, language=language, word_timestamps=True,
-                                          vad_filter=True)
+        segments, info = model.transcribe(
+            path,
+            language=language or os.getenv("VIBETRACK_WHISPER_LANGUAGE") or None,
+            word_timestamps=True,
+            vad_filter=True,                 # тишину между строчками не расшифровываем
+            beam_size=int(os.getenv("VIBETRACK_WHISPER_BEAM", "5")),
+            condition_on_previous_text=False,  # у песен куплеты повторяются: без этого модель зацикливается
+        )
         lines = []
         for seg in segments:
+            text = seg.text.strip()
+            if not text:
+                continue
             words = [LyricWord(w.word.strip(), float(w.start), float(w.end))
-                     for w in (seg.words or [])]
-            lines.append(LyricLine(seg.text.strip(), float(seg.start), float(seg.end), words))
-        return Lyrics(lines=lines, language=info.language, backend="faster-whisper",
-                      text="\n".join(l.text for l in lines))
-    finally:
-        if os.path.exists(path):
-            os.remove(path)
-
-
-def _transcribe_whisper(vocals: Audio, language, model_size) -> Lyrics:  # pragma: no cover
-    import whisper
-
-    path = _tmp_wav(vocals)
-    try:
-        model = whisper.load_model(model_size)
-        result = model.transcribe(path, language=language)
-        lines = [LyricLine(seg["text"].strip(), float(seg["start"]), float(seg["end"]))
-                 for seg in result.get("segments", [])]
-        return Lyrics(lines=lines, language=result.get("language", ""), backend="whisper",
+                     for w in (seg.words or []) if w.word.strip()]
+            lines.append(LyricLine(text, float(seg.start), float(seg.end), words))
+        return Lyrics(lines=lines, language=getattr(info, "language", ""),
+                      backend="faster-whisper",
                       text="\n".join(l.text for l in lines))
     finally:
         if os.path.exists(path):

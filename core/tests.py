@@ -5,6 +5,7 @@ import os
 import shutil
 import tempfile
 
+from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase, override_settings
 from django.urls import reverse
@@ -16,8 +17,10 @@ from .models import AudioFile, RenderJob, Stem, Track, VocalTake
 MEDIA = tempfile.mkdtemp(prefix="vibetrack-media-")
 
 
-@override_settings(MEDIA_ROOT=MEDIA, CELERY_TASK_ALWAYS_EAGER=True,
-                   CELERY_TASK_EAGER_PROPAGATES=True)
+@override_settings(
+    MEDIA_ROOT=MEDIA, CELERY_TASK_ALWAYS_EAGER=True, CELERY_TASK_EAGER_PROPAGATES=True,
+    # в тестах не тянем веса нейросетей из сети — проверяем HTTP-слой, а не модели
+    VIBETRACK={**settings.VIBETRACK, 'SEPARATION_BACKEND': 'dsp'})
 class StudioApiTests(TestCase):
     @classmethod
     def setUpClass(cls):

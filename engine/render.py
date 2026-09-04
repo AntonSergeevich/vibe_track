@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from . import SR
 from .analysis import TrackAnalysis, analyze
 from .arrangement import ArrangementSpec, parse_prompt
+from .llm import refine as llm_refine
 from .audio_io import Audio, load, save
 from .chords import ChordEvent, recognize, to_power_chords
 from .mixing import MixSettings, build_gains, mixdown, stem_report
@@ -41,7 +42,10 @@ class RenderOptions:
     export_format: str = "wav"
     master_loudness_db: float = -10.0
     demucs_model: str = "htdemucs"
+    separation_backend: str = "auto"      # auto | demucs | dsp
     max_duration: float = 480.0           # защита от гигантских файлов
+    use_llm: bool = True                  # уточнять описание через LLM, если она настроена
+    lyrics_language: str = ""             # пусто = определить автоматически
 
 
 @dataclass
@@ -114,11 +118,19 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
     _progress("separate", 25)
     source_stems: dict[str, Audio] = {}
     if options.separate_source:
-        result = separate(source, model=options.demucs_model)
+        backend = options.separation_backend
+        result = separate(source, model=options.demucs_model,
+                          prefer_backend=None if backend == "auto" else backend)
         source_stems = result.stems
-        if result.backend != "demucs":
-            warnings.append("Demucs не установлен — дорожки разделены DSP-методом "
-                            "(качество ниже; установите demucs для студийного разделения).")
+        if result.backend != "demucs" and options.separation_backend != "dsp":
+            reason = result.detail or "причина неизвестна"
+            warnings.append(
+                f"Дорожки разделены DSP-методом вместо Demucs ({reason}). "
+                "Качество ниже: поставьте requirements-ml.txt и прогрейте веса "
+                "командой `python manage.py models --preload`.")
+        else:
+            logger.info("Demucs %s: %s дорожек за %.1f с", result.model,
+                        len(result.stems), result.seconds)
     timer.mark("separate")
 
     _progress("transcribe", 40)
@@ -126,7 +138,8 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
     if options.manual_lyrics.strip():
         lyrics = lyrics_from_text(options.manual_lyrics, analysis)
     elif options.transcribe_lyrics and "vocals" in source_stems:
-        lyrics = transcribe(source_stems["vocals"])
+        lyrics = transcribe(source_stems["vocals"], language=options.lyrics_language or None,
+                            analysis=analysis)
         if lyrics.backend == "unavailable":
             warnings.append("Whisper не установлен — текст не расшифрован. "
                             "Можно вставить текст вручную, аккорды к нему подставятся.")
@@ -134,6 +147,8 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
 
     _progress("arrange", 50)
     spec = parse_prompt(prompt, analysis, overrides)
+    if options.use_llm:
+        spec = llm_refine(spec, prompt, analysis, user_overrides=overrides)
     arrangement = sequence(analysis, to_power_chords(chords), spec)
     timer.mark("arrange")
 

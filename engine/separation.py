@@ -9,21 +9,28 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 
 import numpy as np
 
 from . import SR
-from .audio_io import Audio, save
+from .audio_io import Audio, resample, save
 from .dsp import bandpass, highpass, lowpass
+from .models import ModelUnavailable, demucs_available, get_demucs
 
 logger = logging.getLogger(__name__)
+
+DEMUCS_SR = 44100          # все модели htdemucs обучены на 44.1 кГц стерео
+
 
 @dataclass
 class SeparationResult:
     stems: dict[str, Audio]
     backend: str
     model: str = ""
+    seconds: float = 0.0
+    detail: str = ""
 
     def write(self, out_dir: str, fmt: str = "wav") -> dict[str, str]:
         paths = {}
@@ -33,35 +40,59 @@ class SeparationResult:
         return paths
 
 
-def demucs_available() -> bool:
-    try:
-        import demucs.api  # noqa: F401
+def separate(audio: Audio, model: str = "htdemucs",
+             prefer_backend: str | None = None) -> SeparationResult:
+    """Возвращает дорожки. prefer_backend: 'demucs' | 'dsp' | None (авто).
 
-        return True
-    except Exception:
-        return False
-
-
-def separate(audio: Audio, model: str = "htdemucs", prefer_backend: str | None = None) -> SeparationResult:
-    """Возвращает дорожки. prefer_backend: 'demucs' | 'dsp' | None (авто)."""
+    Demucs используется, когда установлен; при любой его ошибке молча
+    откатываемся на DSP-разделение — пользователь получит результат хуже,
+    но получит.
+    """
+    started = time.time()
+    reason = ""
     backend = prefer_backend or ("demucs" if demucs_available() else "dsp")
+    if backend == "dsp" and prefer_backend != "dsp" and not demucs_available():
+        reason = "пакет demucs не установлен"
     if backend == "demucs":
         try:
-            return _separate_demucs(audio, model)
-        except Exception as exc:  # pragma: no cover - зависит от наличия модели
-            logger.warning("Demucs недоступен (%s), переключаюсь на DSP-разделение", exc)
-    return _separate_dsp(audio)
+            result = _separate_demucs(audio, model)
+            result.seconds = round(time.time() - started, 2)
+            return result
+        except ModelUnavailable as exc:
+            logger.info("Demucs недоступен (%s) — DSP-разделение", exc)
+            reason = str(exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Demucs упал (%s) — DSP-разделение", exc, exc_info=True)
+            reason = str(exc)
+    result = _separate_dsp(audio)
+    result.seconds = round(time.time() - started, 2)
+    result.detail = reason
+    return result
 
 
-def _separate_demucs(audio: Audio, model: str) -> SeparationResult:  # pragma: no cover - тяжёлая зависимость
+def _separate_demucs(audio: Audio, model: str) -> SeparationResult:
+    """Разделение нейросетью Demucs. Модель кэшируется между задачами."""
     import torch
-    from demucs.api import Separator
 
-    separator = Separator(model=model)
-    wav = torch.from_numpy(audio.stereo().data).float()
-    _, sources = separator.separate_tensor(wav, sr=audio.sr)
-    stems = {name: Audio(tensor.cpu().numpy(), audio.sr) for name, tensor in sources.items()}
-    return SeparationResult(stems=stems, backend="demucs", model=model)
+    separator = get_demucs(model)
+    model_sr = int(getattr(separator, "samplerate", DEMUCS_SR) or DEMUCS_SR)
+
+    source = audio.stereo()
+    if source.sr != model_sr:
+        source = resample(source, model_sr)
+
+    wav = torch.from_numpy(np.ascontiguousarray(source.data)).float()
+    with torch.no_grad():
+        _, sources = separator.separate_tensor(wav, sr=model_sr)
+
+    stems: dict[str, Audio] = {}
+    for name, tensor in sources.items():
+        data = tensor.detach().cpu().numpy().astype(np.float32)
+        stem = Audio(data, model_sr)
+        stems[name] = resample(stem, audio.sr) if model_sr != audio.sr else stem
+
+    return SeparationResult(stems=stems, backend="demucs", model=model,
+                            detail=f"{len(stems)} дорожек, {model_sr} Гц")
 
 
 def _separate_dsp(audio: Audio) -> SeparationResult:

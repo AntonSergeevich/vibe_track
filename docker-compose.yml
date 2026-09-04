@@ -40,14 +40,19 @@ services:
     volumes:
       - .:/app
       - media:/app/media
+      - models:/models          # веса Demucs и Whisper переживают перезапуск контейнера
     env_file: [.env]
     environment:
       DATABASE_URL: postgres://vibetrack:vibetrack@db:5432/vibetrack
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       MEDIA_ROOT: /app/media
+      VIBETRACK_MODEL_CACHE: /models
+      VIBETRACK_PRELOAD_MODELS: "1"
+      VIBETRACK_TORCH_THREADS: "2"
     depends_on: [db, redis]
 
 volumes:
   db_data:
   media:
+  models:
