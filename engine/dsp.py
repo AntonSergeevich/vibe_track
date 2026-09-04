@@ -11,7 +11,7 @@ import numpy as np
 from . import SR
 
 try:  # scipy есть в requirements, но код не должен разваливаться без него
-    from scipy.signal import butter, fftconvolve, sosfilt
+    from scipy.signal import butter, oaconvolve, sosfilt
 
     HAS_SCIPY = True
 except Exception:  # pragma: no cover
@@ -189,7 +189,6 @@ def delay_fx(x, sr: int = SR, time_s: float = 0.28, feedback: float = 0.32,
     arr, flat = _as_2d(x)
     d = max(1, int(time_s * sr))
     wet = np.zeros_like(arr)
-    src = arr.copy()
     gain = 1.0
     for tap in range(1, 6):
         gain *= feedback
@@ -198,11 +197,10 @@ def delay_fx(x, sr: int = SR, time_s: float = 0.28, feedback: float = 0.32,
         shift = d * tap
         if shift >= arr.shape[-1]:
             break
-        tap_sig = np.zeros_like(arr)
-        tap_sig[:, shift:] = src[:, : arr.shape[-1] - shift] * gain
-        if pingpong and arr.shape[0] == 2 and tap % 2 == 1:
-            tap_sig = tap_sig[::-1]
-        wet += tap_sig
+        # накапливаем отражения прямо в wet: отдельный массив на отвод — это
+        # лишняя копия всего трека на каждой итерации
+        src = arr[::-1] if (pingpong and arr.shape[0] == 2 and tap % 2 == 1) else arr
+        wet[:, shift:] += src[:, : arr.shape[-1] - shift] * gain
     wet = lowpass(wet, 6000, sr)
     return _restore(((1 - mix_amt) * arr + mix_amt * wet).astype(np.float32), flat)
 
@@ -228,7 +226,9 @@ def reverb(x, sr: int = SR, decay_s: float = 1.6, mix_amt: float = 0.18,
         return _restore(arr, flat)
     ir = _reverb_ir(sr, decay_s, pre_delay_ms, damping)
     stereo = arr if arr.shape[0] == 2 else np.repeat(arr, 2, axis=0)
-    wet = np.stack([fftconvolve(stereo[c], ir[c])[: stereo.shape[-1]] for c in range(2)])
+    # overlap-add вместо полной свёртки: память зависит от длины импульса,
+    # а не от длины трека
+    wet = np.stack([oaconvolve(stereo[c], ir[c])[: stereo.shape[-1]] for c in range(2)])
     wet *= 0.35
     out = (1 - mix_amt) * stereo + mix_amt * wet
     if arr.shape[0] == 1:
@@ -310,6 +310,31 @@ def normalize_loudness(x, target_db: float = -14.0, sr: int = SR):
     return _restore(out, flat)
 
 
+def _stft_mag_phase(ch: np.ndarray, frame: int, hop: int, window: np.ndarray,
+                    block: int = 256) -> tuple[np.ndarray, np.ndarray]:
+    """Амплитуда и фаза STFT во float32, посчитанные блоками.
+
+    Наивная реализация держит всю комплексную матрицу целиком: на трёхминутном
+    треке это сотни мегабайт на канал. Считаем блоками кадров и сразу пишем в
+    заранее выделенные float32-массивы — пик памяти падает примерно в пять раз.
+    """
+    bins = frame // 2 + 1
+    if len(ch) < frame:
+        ch = np.pad(ch, (0, frame - len(ch)))
+    n_frames = max(1, 1 + (len(ch) - frame) // hop)
+    mag = np.empty((n_frames, bins), dtype=np.float32)
+    phase = np.empty((n_frames, bins), dtype=np.float32)
+
+    for start in range(0, n_frames, block):
+        stop = min(start + block, n_frames)
+        idx = np.arange(frame)[None, :] + hop * np.arange(start, stop)[:, None]
+        spec = np.fft.rfft(ch[idx] * window, axis=1)
+        mag[start:stop] = np.abs(spec).astype(np.float32)
+        phase[start:stop] = np.angle(spec).astype(np.float32)
+        del spec
+    return mag, phase
+
+
 def time_stretch(x, rate: float, sr: int = SR, frame: int = 2048, hop: int = 512):
     """Фазовый вокодер: меняет длительность, не трогая высоту."""
     arr, flat = _as_2d(x)
@@ -318,31 +343,31 @@ def time_stretch(x, rate: float, sr: int = SR, frame: int = 2048, hop: int = 512
     window = np.hanning(frame).astype(np.float32)
     out_channels = []
     for ch in arr:
-        n_frames = max(1, 1 + (len(ch) - frame) // hop)
-        stft = np.stack([
-            np.fft.rfft(ch[i * hop: i * hop + frame] * window)
-            for i in range(n_frames)
-            if i * hop + frame <= len(ch)
-        ]) if len(ch) >= frame else np.zeros((1, frame // 2 + 1), dtype=complex)
-        mag, phase = np.abs(stft), np.angle(stft)
-        dphase = np.diff(phase, axis=0, prepend=phase[:1])
-        positions = np.arange(0, stft.shape[0] - 1, rate)
+        mag, phase = _stft_mag_phase(ch, frame, hop, window)
+        n_frames = mag.shape[0]
+        positions = np.arange(0, max(n_frames - 1, 1), rate)
         out_len = int(len(positions) * hop) + frame
         out = np.zeros(out_len, dtype=np.float32)
         win_sum = np.zeros(out_len, dtype=np.float32)
-        acc_phase = phase[0].copy()
+        acc_phase = phase[0].astype(np.float32).copy()
+        window_sq = (window ** 2).astype(np.float32)
+
         for i, p in enumerate(positions):
-            idx = int(np.floor(p))
+            idx = int(p)
             frac = p - idx
-            m = (1 - frac) * mag[idx] + frac * mag[min(idx + 1, len(mag) - 1)]
-            spec = m * np.exp(1j * acc_phase)
-            grain = np.fft.irfft(spec, n=frame).astype(np.float32) * window
+            nxt = min(idx + 1, n_frames - 1)
+            m = (1 - frac) * mag[idx] + frac * mag[nxt]
+            grain = np.fft.irfft(m * np.exp(1j * acc_phase), n=frame).astype(np.float32) * window
             start = i * hop
             out[start: start + frame] += grain
-            win_sum[start: start + frame] += window ** 2
-            acc_phase = acc_phase + dphase[min(idx + 1, len(dphase) - 1)]
+            win_sum[start: start + frame] += window_sq
+            # приращение фазы берём на лету — матрица разностей целиком не нужна
+            acc_phase += phase[nxt] - phase[max(nxt - 1, 0)]
+
         out /= np.maximum(win_sum, 1e-6)
         out_channels.append(out)
+        del mag, phase
+
     n = max(len(c) for c in out_channels)
     stacked = np.stack([np.pad(c, (0, n - len(c))) for c in out_channels])
     return _restore(stacked.astype(np.float32), flat)
@@ -367,16 +392,39 @@ def pitch_shift(x, semitones: float, sr: int = SR):
     return _restore(out, flat)
 
 
-def formant_shift(x, semitones: float, sr: int = SR):
-    """Грубый сдвиг формант: масштабируем спектральную огибающую."""
+def formant_shift(x, semitones: float, sr: int = SR, frame: int = 2048, hop: int = 512):
+    """Сдвиг формант: масштабирование спектральной огибающей по кадрам.
+
+    Считается покадрово, а не на весь трек разом. Так правильнее по сути
+    (форманты меняются во времени, огибающая у каждого кадра своя) и память
+    не зависит от длины трека — на трёхминутном файле это сотни мегабайт
+    разницы.
+    """
     arr, flat = _as_2d(x)
+    if abs(semitones) < 1e-3:
+        return _restore(arr, flat)
     ratio = 2.0 ** (semitones / 12.0)
-    n = arr.shape[-1]
-    spec = np.fft.rfft(arr, axis=-1)
-    mag, phase = np.abs(spec), np.angle(spec)
-    bins = np.arange(mag.shape[-1])
-    shifted = np.stack([np.interp(bins, bins * ratio, m, left=0.0, right=0.0) for m in mag])
-    out = np.fft.irfft(shifted * np.exp(1j * phase), n=n, axis=-1)
+    window = np.hanning(frame).astype(np.float32)
+    window_sq = (window ** 2).astype(np.float32)
+    bins = np.arange(frame // 2 + 1, dtype=np.float32)
+    src_bins = bins * ratio
+
+    out = np.zeros_like(arr)
+    for c, ch in enumerate(arr):
+        n = len(ch)
+        if n < frame:
+            out[c] = ch
+            continue
+        win_sum = np.zeros(n, dtype=np.float32)
+        for start in range(0, n - frame + 1, hop):
+            seg = ch[start: start + frame] * window
+            spec = np.fft.rfft(seg)
+            mag = np.abs(spec)
+            shifted = np.interp(bins, src_bins, mag, left=0.0, right=0.0)
+            grain = np.fft.irfft(shifted * np.exp(1j * np.angle(spec)), n=frame)
+            out[c, start: start + frame] += grain.astype(np.float32) * window
+            win_sum[start: start + frame] += window_sq
+        out[c] /= np.maximum(win_sum, 1e-6)
     return _restore(out.astype(np.float32), flat)
 
 

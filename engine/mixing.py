@@ -57,16 +57,23 @@ class MixSettings:
 
 def mixdown(stems: dict[str, Audio], settings: MixSettings | None = None,
             vocal_keys: tuple[str, ...] = ("vocals", "vocals_female"),
-            sr: int = SR) -> tuple[Audio, dict[str, Audio]]:
-    """Возвращает (мастер, обработанные дорожки)."""
+            sr: int = SR, consume: bool = False) -> tuple[Audio, dict[str, Audio]]:
+    """Возвращает (мастер, обработанные дорожки).
+
+    consume=True освобождает исходные дорожки по мере обработки: иначе в
+    памяти одновременно лежат две копии всего микса. На трёхминутном треке
+    это разница в сотни мегабайт, то есть разница в тарифе сервера.
+    """
     settings = settings or MixSettings()
     if not stems:
         return Audio(np.zeros((2, 1), dtype=np.float32), sr), {}
 
     n = max(a.n_samples for a in stems.values())
     processed: dict[str, Audio] = {}
-    for name, audio in stems.items():
+    for name in list(stems):
+        audio = stems.pop(name) if consume else stems[name]
         data = pad_to(audio.stereo(), n).data * db_to_lin(settings.gains_db.get(name, -8.0))
+        del audio
         data = _bus_eq(name, data, sr)
         if float(np.max(np.abs(data))) > db_to_lin(-1.0):
             data = limiter(data, ceiling_db=-1.0, sr=sr)   # дорожки отдаём без клиппинга

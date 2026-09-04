@@ -169,7 +169,8 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
                            master_loudness_db=options.master_loudness_db)
     if options.blend_source_db is not None:
         settings.gains_db["source"] = options.blend_source_db
-    master, processed = mixdown(stems, settings, sr=SR)
+    # consume=True: дорожки освобождаются по мере сведения, дальше они не нужны
+    master, processed = mixdown(stems, settings, sr=SR, consume=True)
     timer.mark("mix")
 
     _progress("score", 92)

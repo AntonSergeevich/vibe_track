@@ -186,6 +186,18 @@ class TestMixing(EngineTestCase):
         gains = build_gains(spec)
         self.assertAlmostEqual(gains["bass"], -3.0 + 3.0)
 
+    def test_consume_frees_input_stems(self):
+        """consume=True не должен оставлять в памяти вторую копию всего микса."""
+        spec = parse_prompt("ню-метал drop C", self.analysis)
+        arrangement = sequence(self.analysis, to_power_chords(self.chords), spec)
+        stems = render_arrangement(arrangement)
+        names = set(stems)
+
+        master, processed = mixdown(stems, consume=True)
+        self.assertEqual(stems, {}, "исходные дорожки освобождены по мере сведения")
+        self.assertEqual(set(processed), names, "но результат содержит все дорожки")
+        self.assertLessEqual(master.peak(), 1.0)
+
     def test_master_does_not_clip(self):
         spec = parse_prompt("ню-метал drop C, скретчи", self.analysis)
         arrangement = sequence(self.analysis, to_power_chords(self.chords), spec)
