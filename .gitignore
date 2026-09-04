@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.env
+*.sqlite3
+media/
+staticfiles/
+renders/
+.idea/
+.DS_Store
+.pytest_cache/

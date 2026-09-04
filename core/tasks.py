@@ -1,117 +1,212 @@
 # core/tasks.py
-import os
-import io
-import subprocess
+"""Celery-задачи: мост между Django-моделями и аудиодвижком.
+
+Движок ничего не знает про Django — он получает пути к файлам и
+возвращает результат, а задачи раскладывают его по моделям.
+"""
+from __future__ import annotations
+
 import logging
+import os
+import traceback
+
 from celery import shared_task
 from django.conf import settings
-from django.core.files.base import ContentFile
-from django.utils import timezone
 
-from .models import AudioFile
+from engine.render import RenderOptions, add_vocal_take, transform
+
+from .models import AudioFile, RenderJob, Score, Stem, VocalTake
 
 logger = logging.getLogger(__name__)
 
-def get_duration_with_ffprobe(file_bytes):
-    """
-    Возвращает длительность в секундах, используя ffprobe (читает из stdin через временный файл).
-    """
-    import tempfile
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        tmp.write(file_bytes)
-        tmp.flush()
-        tmp_path = tmp.name
+STEM_LABELS = {
+    "guitar_rhythm": "Ритм-гитара (лево)",
+    "guitar_rhythm_r": "Ритм-гитара (право)",
+    "guitar_lead": "Соло-гитара",
+    "bass": "Бас",
+    "drums": "Барабаны",
+    "percussion": "Перкуссия",
+    "turntables": "Скретчи",
+    "synth_pad": "Пэд",
+    "synth_stab": "Синт-стэбы",
+    "vocals": "Вокал (муж.)",
+    "vocals_female": "Вокал (жен.)",
+    "vocals_harmony": "Гармония",
+    "source": "Исходник (подложка)",
+}
 
-    try:
-        cmd = [
-            "ffprobe", "-v", "error", "-show_entries",
-            "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", tmp_path
-        ]
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
-        duration = float(out.strip())
-        return duration
-    finally:
-        try:
-            os.remove(tmp_path)
-        except Exception:
-            pass
 
-def normalize_with_ffmpeg(file_bytes):
-    """
-    Нормализует аудио до -20 dBFS с помощью ffmpeg и возвращает bytes WAV.
-    Использует loudnorm фильтр (two-pass) — простой вариант.
-    """
-    import tempfile
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as in_tmp:
-        in_tmp.write(file_bytes)
-        in_tmp.flush()
-        in_path = in_tmp.name
+def media_path(*parts: str) -> str:
+    return os.path.join(str(settings.MEDIA_ROOT), *parts)
 
-    out_path = in_path + "_norm.wav"
-    try:
-        # Простой one-pass gain normalization через loudnorm (можно улучшить)
-        cmd = [
-            "ffmpeg", "-y", "-i", in_path,
-            "-af", "loudnorm=I=-20:TP=-1.5:LRA=11",
-            "-ar", "44100", "-ac", "2",
-            out_path
-        ]
-        subprocess.check_output(cmd, stderr=subprocess.STDOUT)
-        with open(out_path, "rb") as f:
-            data = f.read()
-        return data
-    finally:
-        for p in (in_path, out_path):
-            try:
-                if os.path.exists(p):
-                    os.remove(p)
-            except Exception:
-                pass
 
-try:
-    import noisereduce as nr
-    HAS_NR = True
-except Exception:
-    HAS_NR = False
+def relative_to_media(path: str) -> str:
+    return os.path.relpath(path, str(settings.MEDIA_ROOT)).replace(os.sep, "/")
+
+
+def _engine_options(job: RenderJob) -> RenderOptions:
+    cfg = settings.VIBETRACK
+    options = job.options or {}
+    return RenderOptions(
+        separate_source=options.get("separate_source", True),
+        keep_original_vocals=options.get("keep_original_vocals", True),
+        transcribe_lyrics=options.get("transcribe_lyrics", True),
+        manual_lyrics=options.get("manual_lyrics", "") or "",
+        blend_source_db=options.get("blend_source_db"),
+        export_format=options.get("export_format", cfg["EXPORT_FORMAT"]),
+        master_loudness_db=options.get("master_loudness_db", cfg["MASTER_LOUDNESS_DB"]),
+        demucs_model=cfg["DEMUCS_MODEL"],
+        max_duration=cfg["MAX_DURATION"],
+    )
+
 
 @shared_task(bind=True)
-def process_audio_file(self, audiofile_id, mode='denoise'):
-    af = AudioFile.objects.get(id=audiofile_id)
-    af.status = 'processing'
-    af.save(update_fields=['status'])
+def render_track(self, job_id: int) -> dict:
+    """Главная задача: исходный трек + описание → ню-метал версия."""
+    job = RenderJob.objects.select_related("track").get(pk=job_id)
+    job.status = RenderJob.STATUS_RUNNING
+    job.stage = "load"
+    job.progress = 1
+    job.celery_task_id = getattr(self.request, "id", "") or ""
+    job.error = ""
+    job.save(update_fields=["status", "stage", "progress", "celery_task_id", "error", "updated_at"])
 
-    src_path = af.file.path
-    tmp_wav = src_path + ".tmp.wav"
+    source = job.track.source_file
+    if source is None or not source.file:
+        job.status = RenderJob.STATUS_ERROR
+        job.error = "У трека нет исходного файла."
+        job.save(update_fields=["status", "error", "updated_at"])
+        return {"status": "error", "detail": job.error}
 
-    # Конвертируем в WAV 16k mono
-    cmd = [
-        "ffmpeg", "-y", "-i", src_path,
-        "-ar", "16000", "-ac", "1", "-sample_fmt", "s16",
-        tmp_wav
-    ]
-    subprocess.run(cmd, check=True)
+    out_dir = media_path("renders", f"job_{job.pk}")
 
-    data, sr = sf.read(tmp_wav)
-    if data.ndim > 1:
-        data = np.mean(data, axis=1)
-
-    if mode == 'denoise' and HAS_NR:
-        reduced = nr.reduce_noise(y=data, sr=sr)
-    else:
-        reduced = data
-
-    out_name = f"processed_{af.id}.wav"
-    out_wav = os.path.join(settings.MEDIA_ROOT, out_name)
-    sf.write(out_wav, reduced, sr, subtype='PCM_16')
-
-    af.file.name = out_name
-    af.duration = len(reduced) / sr
-    af.status = 'done'
-    af.save(update_fields=['file', 'duration', 'status'])
+    def progress(stage: str, pct: int) -> None:
+        RenderJob.objects.filter(pk=job.pk).update(stage=stage, progress=pct)
 
     try:
-        os.remove(tmp_wav)
-    except OSError:
-        pass
+        result = transform(
+            source_path=source.file.path,
+            prompt=job.prompt or "",
+            overrides=job.overrides or {},
+            out_dir=out_dir,
+            options=_engine_options(job),
+            progress=progress,
+        )
+    except Exception as exc:  # noqa: BLE001 — пользователю нужен текст ошибки
+        logger.exception("Рендер #%s упал", job.pk)
+        job.status = RenderJob.STATUS_ERROR
+        job.stage = "error"
+        job.error = f"{exc}\n{traceback.format_exc(limit=4)}"
+        job.save(update_fields=["status", "stage", "error", "updated_at"])
+        return {"status": "error", "detail": str(exc)}
 
-    return {'status': 'ok', 'duration': af.duration}
+    _store_result(job, result)
+    return {"status": "done", "job": job.pk, "stems": len(result.stem_paths)}
+
+
+def _store_result(job: RenderJob, result) -> None:
+    job.master.name = relative_to_media(result.master_path)
+    job.spec = result.spec
+    job.warnings = result.warnings
+    job.result = {
+        "analysis": result.analysis,
+        "report": result.report,
+        "timings": result.timings,
+        "arrangement_bars": len(result.arrangement.get("bars", [])),
+    }
+    job.status = RenderJob.STATUS_DONE
+    job.stage = "done"
+    job.progress = 100
+    job.save()
+
+    job.track.analysis = result.analysis
+    job.track.save(update_fields=["analysis"])
+
+    job.stems.all().delete()
+    for name, path in result.stem_paths.items():
+        info = result.report.get(name, {})
+        Stem.objects.create(
+            job=job,
+            name=name,
+            label=STEM_LABELS.get(name, name.replace("source_", "Исходник: ")),
+            file=relative_to_media(path),
+            source="source" if name.startswith("source_") else "generated",
+            peak_db=info.get("peak_db"),
+            rms_db=info.get("rms_db"),
+            duration=info.get("duration"),
+        )
+
+    Score.objects.update_or_create(
+        job=job,
+        defaults={
+            "lyrics": result.lyrics,
+            "lyric_sheet": result.lyric_sheet,
+            "chords": result.chords,
+            "chord_chart": result.chord_chart,
+            "tabs": result.tabs,
+            "key": result.analysis.get("key_name", ""),
+            "tempo": result.analysis.get("tempo"),
+            "tuning": (result.spec or {}).get("tuning", ""),
+        },
+    )
+
+    AudioFile.objects.update_or_create(
+        track=job.track,
+        kind=AudioFile.KIND_MASTER,
+        file=job.master.name,
+        defaults={"status": "done", "duration": result.analysis.get("duration")},
+    )
+
+
+@shared_task(bind=True)
+def process_vocal_take(self, take_id: int) -> dict:
+    """Записанный голос: автообработка и вписывание в минусовку."""
+    take = VocalTake.objects.select_related("track", "job").get(pk=take_id)
+    take.status = RenderJob.STATUS_RUNNING
+    take.error = ""
+    take.save(update_fields=["status", "error"])
+
+    instrumental = _instrumental_for(take)
+    if instrumental is None:
+        take.status = RenderJob.STATUS_ERROR
+        take.error = "Не найдена минусовка: сначала сделайте рендер трека."
+        take.save(update_fields=["status", "error"])
+        return {"status": "error", "detail": take.error}
+
+    out_dir = media_path("takes", f"take_{take.pk}")
+    try:
+        result = add_vocal_take(
+            instrumental_path=instrumental,
+            take_path=take.raw_file.path,
+            out_dir=out_dir,
+            style=take.style,
+            gender=take.gender,
+            target_gender=take.target_gender or None,
+            autotune_strength=take.autotune,
+            take_gain_db=take.gain_db,
+            master_loudness_db=settings.VIBETRACK["MASTER_LOUDNESS_DB"],
+            export_format=settings.VIBETRACK["EXPORT_FORMAT"],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Обработка дубля #%s упала", take.pk)
+        take.status = RenderJob.STATUS_ERROR
+        take.error = str(exc)
+        take.save(update_fields=["status", "error"])
+        return {"status": "error", "detail": str(exc)}
+
+    take.processed_file.name = relative_to_media(result["vocal_path"])
+    take.mixed_file.name = relative_to_media(result["master_path"])
+    take.latency_ms = result["latency_ms"]
+    take.notes = result["notes"]
+    take.status = RenderJob.STATUS_DONE
+    take.save()
+    return {"status": "done", "take": take.pk, "latency_ms": take.latency_ms}
+
+
+def _instrumental_for(take: VocalTake) -> str | None:
+    """Минусовка = мастер последнего рендера трека."""
+    job = take.job or take.track.render_jobs.filter(status=RenderJob.STATUS_DONE).first()
+    if job and job.master:
+        return job.master.path
+    source = take.track.source_file
+    return source.file.path if source else None

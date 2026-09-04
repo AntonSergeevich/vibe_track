@@ -1,20 +1,26 @@
-# Dockerfile
 FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y ffmpeg build-essential libsndfile1 && rm -rf /var/lib/apt/lists/*
+# ffmpeg нужен для mp3/m4a/webm (запись с микрофона приходит в webm),
+# libsndfile — для wav/flac через soundfile
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg libsndfile1 build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY pyproject.toml requirements.txt /app/
-RUN pip install --upgrade pip
-RUN pip install -r requirements.txt
+COPY requirements.txt requirements-ml.txt /app/
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# Тяжёлые модели ставятся отдельно: docker build --build-arg WITH_ML=1
+ARG WITH_ML=0
+RUN if [ "$WITH_ML" = "1" ]; then pip install -r requirements-ml.txt; fi
 
 COPY . /app
+RUN mkdir -p /app/media /app/staticfiles
 
-# Собираем статику при сборке если нужно
-# RUN python manage.py collectstatic --noinput
-
-CMD ["gunicorn", "vibetrack_site.wsgi:application", "--bind", "0.0.0.0:8000"]
+CMD ["gunicorn", "vibetrack_site.wsgi:application", "--bind", "0.0.0.0:8000", \
+     "--workers", "3", "--timeout", "120"]
