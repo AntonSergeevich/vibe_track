@@ -16,8 +16,15 @@ COPY requirements.txt requirements-ml.txt /app/
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # Тяжёлые модели ставятся отдельно: docker build --build-arg WITH_ML=1
+# По умолчанию берём CPU-сборку torch: обычный пакет с PyPI тянет 3.2 ГБ
+# библиотек CUDA, которые на VPS без видеокарты лежат мёртвым грузом.
+# Для GPU-машины: --build-arg TORCH_INDEX=https://pypi.org/simple
 ARG WITH_ML=0
-RUN if [ "$WITH_ML" = "1" ]; then pip install -r requirements-ml.txt; fi
+ARG TORCH_INDEX=https://download.pytorch.org/whl/cpu
+RUN if [ "$WITH_ML" = "1" ]; then \
+        pip install --index-url "$TORCH_INDEX" --extra-index-url https://pypi.org/simple \
+            -r requirements-ml.txt; \
+    fi
 
 COPY . /app
 RUN mkdir -p /app/media /app/staticfiles
