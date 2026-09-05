@@ -1,0 +1,22 @@
+{% load static %}<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Вход — VibeTrack</title>
+<link rel="stylesheet" href="{% static 'studio/studio.css' %}">
+</head>
+<body>
+<header class="top"><h1>VIBE<span>TRACK</span></h1><p class="tagline">Вход в кабинет</p></header>
+<main>
+  <section class="card">
+    <form method="post">
+      {% csrf_token %}
+      {% for field in form %}<label>{{ field.label }}{{ field }}</label>{% endfor %}
+      {% if form.errors %}<p class="warnings">Неверное имя пользователя или пароль.</p>{% endif %}
+      <button class="primary" type="submit">Войти</button>
+    </form>
+    <p class="hint">Нет аккаунта? <a href="{% url 'register' %}">Зарегистрироваться</a></p>
+  </section>
+</main>
+</body>
+</html>

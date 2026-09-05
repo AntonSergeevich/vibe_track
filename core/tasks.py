@@ -15,6 +15,7 @@ from django.conf import settings
 
 from engine.render import RenderOptions, add_vocal_take, transform
 
+from . import billing
 from .models import AudioFile, RenderJob, Score, Stem, VocalTake
 
 logger = logging.getLogger(__name__)
@@ -79,6 +80,7 @@ def render_track(self, job_id: int) -> dict:
         job.status = RenderJob.STATUS_ERROR
         job.error = "У трека нет исходного файла."
         job.save(update_fields=["status", "error", "updated_at"])
+        billing.refund(job.track.project.owner, job, "нет исходного файла")
         return {"status": "error", "detail": job.error}
 
     out_dir = media_path("renders", f"job_{job.pk}")
@@ -101,6 +103,8 @@ def render_track(self, job_id: int) -> dict:
         job.stage = "error"
         job.error = f"{exc}\n{traceback.format_exc(limit=4)}"
         job.save(update_fields=["status", "stage", "error", "updated_at"])
+        # трек не получился — списание возвращаем, это наша ошибка, а не его
+        billing.refund(job.track.project.owner, job, f"рендер упал: {exc}"[:200])
         return {"status": "error", "detail": str(exc)}
 
     _store_result(job, result)

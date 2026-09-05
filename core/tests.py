@@ -175,6 +175,183 @@ class StudioApiTests(TestCase):
         self.assertEqual(response.status_code, 400)
 
 
+@override_settings(MEDIA_ROOT=MEDIA)
+class BillingTests(TestCase):
+    """Тарифы, лимиты, списания и возвраты."""
+
+    def setUp(self):
+        from .models import Project, Track, User
+
+        self.user = User.objects.create_user(username="musician", password="pass12345")
+        self.project = Project.objects.create(owner=self.user, title="Мои треки")
+        self.track = Track.objects.create(project=self.project, title="Трек")
+
+    def _job(self):
+        return RenderJob.objects.create(track=self.track, prompt="ню-метал")
+
+    def test_new_user_is_on_free_plan(self):
+        from . import billing
+
+        plan = billing.plan_for(self.user)
+        self.assertEqual(plan.slug, "free")
+        self.assertEqual(billing.remaining(self.user), 2)
+
+    def test_charge_and_refund_accounting(self):
+        from . import billing
+
+        job = self._job()
+        billing.charge(self.user, job)
+        self.assertEqual(billing.remaining(self.user), 1)
+
+        billing.refund(self.user, job, "рендер упал")
+        self.assertEqual(billing.remaining(self.user), 2, "возврат вернул трек в лимит")
+
+        billing.refund(self.user, job, "повторный возврат")
+        self.assertEqual(billing.remaining(self.user), 2, "дважды возвращать нельзя")
+
+    def test_quota_exceeded_raises_with_offer(self):
+        from . import billing
+
+        for _ in range(2):
+            billing.charge(self.user, self._job())
+        with self.assertRaises(billing.QuotaExceeded) as ctx:
+            billing.check_quota(self.user)
+        self.assertIn("190", str(ctx.exception), "в отказе должно быть предложение купить")
+
+    def test_paid_plan_raises_limit_and_unlocks_wav(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from . import billing
+        from .models import Subscription
+
+        Subscription.objects.create(user=self.user, plan="studio",
+                                    expires_at=timezone.now() + timedelta(days=30))
+        plan = billing.plan_for(self.user)
+        self.assertEqual(plan.slug, "studio")
+        self.assertEqual(plan.tracks, 90)
+        options = billing.render_options_for(plan)
+        self.assertEqual(options["export_format"], "wav")
+        self.assertEqual(options["separation_backend"], "auto")
+
+    def test_free_plan_gets_mp3_and_dsp(self):
+        from . import billing
+
+        options = billing.render_options_for(billing.PLANS["free"])
+        self.assertEqual(options["export_format"], "mp3")
+        self.assertEqual(options["separation_backend"], "dsp",
+                         "бесплатный тариф не должен занимать Demucs")
+
+    def test_expired_subscription_falls_back_to_free(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from . import billing
+        from .models import Subscription
+
+        Subscription.objects.create(user=self.user, plan="pro",
+                                    started_at=timezone.now() - timedelta(days=60),
+                                    expires_at=timezone.now() - timedelta(days=1))
+        self.assertEqual(billing.plan_for(self.user).slug, "free")
+
+    def test_transform_returns_402_when_quota_is_out(self):
+        from . import billing
+
+        for _ in range(2):
+            billing.charge(self.user, self._job())
+        AudioFile.objects.create(track=self.track, file="audio/x.wav",
+                                 kind=AudioFile.KIND_SOURCE, status="done")
+        self.client.force_login(self.user)
+        response = self.client.post(f"/api/tracks/{self.track.pk}/transform/", {},
+                                    content_type="application/json")
+        self.assertEqual(response.status_code, 402)
+        self.assertEqual(response.json()["code"], "quota_exceeded")
+
+    def test_checkout_creates_pending_payment(self):
+        from .models import Payment
+
+        self.client.force_login(self.user)
+        response = self.client.post("/api/billing/checkout/", {"plan": "studio"},
+                                    content_type="application/json")
+        self.assertEqual(response.status_code, 202)
+        payment = Payment.objects.get(user=self.user)
+        self.assertEqual(payment.amount_rub, 690)
+        self.assertEqual(payment.status, Payment.STATUS_PENDING)
+        self.assertEqual(billing_plan_slug(self.user), "free",
+                         "неоплаченный счёт не должен включать тариф")
+
+    @override_settings(VIBETRACK_PAYMENTS_TEST_MODE=True)
+    def test_checkout_in_test_mode_activates_subscription(self):
+        self.client.force_login(self.user)
+        response = self.client.post("/api/billing/checkout/", {"plan": "start"},
+                                    content_type="application/json")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(billing_plan_slug(self.user), "start")
+        self.assertEqual(response.json()["billing"]["remaining"], 40)
+
+    def test_checkout_rejects_unknown_plan(self):
+        self.client.force_login(self.user)
+        for bad in ("free", "platinum", ""):
+            response = self.client.post("/api/billing/checkout/", {"plan": bad},
+                                        content_type="application/json")
+            self.assertEqual(response.status_code, 400, bad)
+
+
+@override_settings(MEDIA_ROOT=MEDIA)
+class CabinetTests(TestCase):
+    """Личный кабинет и вход."""
+
+    def setUp(self):
+        from .models import User
+
+        self.user = User.objects.create_user(username="singer", password="pass12345")
+
+    def test_cabinet_requires_login(self):
+        response = self.client.get("/cabinet/")
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/accounts/login/", response["Location"])
+
+    def test_cabinet_shows_plan_and_tracks(self):
+        from .models import Project, RenderJob, Track
+
+        project = Project.objects.create(owner=self.user, title="Мои треки")
+        track = Track.objects.create(project=project, title="Мой трек")
+        RenderJob.objects.create(track=track, prompt="ню-метал в духе Korn",
+                                 status=RenderJob.STATUS_DONE)
+
+        self.client.force_login(self.user)
+        response = self.client.get("/cabinet/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Проба")
+        self.assertContains(response, "Мой трек")
+        self.assertContains(response, "690")      # витрина тарифов на месте
+
+    def test_registration_creates_user_and_logs_in(self):
+        response = self.client.post("/accounts/register/", {
+            "username": "newbie",
+            "password1": "verystrongpass123",
+            "password2": "verystrongpass123",
+        })
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response["Location"], "/cabinet/")
+        self.assertTrue(self.client.session.get("_auth_user_id"))
+
+    def test_billing_summary_endpoint(self):
+        self.client.force_login(self.user)
+        data = self.client.get("/api/billing/summary/").json()
+        self.assertEqual(data["plan"]["slug"], "free")
+        self.assertEqual(data["remaining"], 2)
+        self.assertEqual(len(data["plans"]), 5)
+
+
+def billing_plan_slug(user) -> str:
+    from . import billing
+
+    return billing.plan_for(user).slug
+
+
 def None_project():
     """Проект-заглушка для теста трека без исходника."""
     from .models import Project, User

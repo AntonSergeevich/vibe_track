@@ -150,6 +150,7 @@ class ArrangementSpec:
     aggression: float = 0.75          # 0..1 — гейн, плотность, скорость
     density: float = 0.7              # плотность нот в риффе
     swing: float = 0.0
+    transpose: int = 0                # сдвиг тональности в полутонах, -12..+12
     tempo_scale: float = 1.0          # растяжение исходного темпа
     seed: int = 1337
     instruments: list[InstrumentSpec] = field(default_factory=list)
@@ -251,6 +252,23 @@ def parse_prompt(prompt: str, analysis: TrackAnalysis | None = None,
     if any(k in text for k in ("мягч", "спокойн", "меланхол", "атмосферн")):
         spec.aggression = max(0.25, spec.aggression - 0.25)
 
+    # 3.5 Тональность
+    semitones = re.search(r"(?:на\s*)?(\d+)\s*полутон", text)
+    tones = re.search(r"(?:на\s*)?(\d+)\s*тон[аоуы]?\b", text)
+    shift = 0
+    if semitones:
+        shift = int(semitones.group(1))
+    elif tones:
+        shift = int(tones.group(1)) * 2
+    elif re.search(r"на\s*пол\s?тона", text):
+        shift = 1
+    elif re.search(r"на\s*тон\b", text):
+        shift = 2
+    if shift:
+        direction = -1 if ("ниже" in text or "низк" in text) else 1
+        spec.transpose = max(-12, min(12, shift * direction))
+        notes.append(f"Тональность сдвинута на {spec.transpose:+d} полутона.")
+
     # 4. Темп
     bpm = re.search(r"(\d{2,3})\s*(?:bpm|бпм|уд/?мин)", text)
     if bpm:
@@ -330,7 +348,7 @@ def _parse_vocals(text: str) -> VocalSpec:
 def apply_overrides(spec: ArrangementSpec, overrides: dict) -> ArrangementSpec:
     """Явные значения из UI/API перекрывают то, что вытащено из текста."""
     simple = ("tempo", "key", "mode", "groove", "aggression", "density", "swing",
-              "tuning", "bass_tuning", "seed", "title", "tempo_scale")
+              "tuning", "bass_tuning", "seed", "title", "tempo_scale", "transpose")
     for field_name in simple:
         if overrides.get(field_name) not in (None, ""):
             setattr(spec, field_name, overrides[field_name])

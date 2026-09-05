@@ -5,8 +5,11 @@ from __future__ import annotations
 import os
 
 from django.conf import settings
+from django.contrib.auth import login
+from django.contrib.auth.decorators import login_required
 from django.http import FileResponse, Http404, JsonResponse
-from django.shortcuts import render
+from django.shortcuts import redirect, render
+from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -18,8 +21,10 @@ from engine.arrangement import (BASS_TUNINGS, GROOVE_KEYWORDS, INSTRUMENT_CATALO
 from engine.models import status as model_status
 from engine.tabs import TUNING_LABELS
 
-from .models import (AudioFile, Billing, EffectChain, Project, RenderJob, Track, User,
-                     VocalTake)
+from . import billing as billing_service
+from .forms import RegisterForm
+from .models import (AudioFile, Billing, EffectChain, Payment, Project, RenderJob,
+                     Subscription, Track, UsageRecord, User, VocalTake)
 from .serializers import (AudioFileSerializer, BillingSerializer, EffectChainSerializer,
                           ProjectSerializer, RenderJobCreateSerializer, RenderJobSerializer,
                           ScoreSerializer, TrackSerializer, TrackUploadSerializer,
@@ -40,6 +45,36 @@ def studio(request):
         'references': sorted({a for a in REFERENCE_ARTISTS if a.isascii()}),
         'max_upload_mb': settings.VIBETRACK_MAX_UPLOAD_MB,
     })
+
+
+@login_required
+def cabinet(request):
+    """Личный кабинет: тариф, остаток, история треков и платежей."""
+    jobs = (RenderJob.objects
+            .filter(track__project__owner=request.user)
+            .select_related('track', 'score')
+            .prefetch_related('stems')[:50])
+    return render(request, 'studio/cabinet.html', {
+        'billing': billing_service.summary(request.user),
+        'plans': billing_service.PLANS.values(),
+        'jobs': jobs,
+        'payments': Payment.objects.filter(user=request.user)[:20],
+        'subscription': Subscription.objects.filter(
+            user=request.user, expires_at__gt=timezone.now()).first(),
+        'usage': UsageRecord.objects.filter(user=request.user)[:20],
+    })
+
+
+def register(request):
+    """Регистрация. После создания аккаунта сразу пускаем внутрь."""
+    if request.user.is_authenticated:
+        return redirect('cabinet')
+    form = RegisterForm(request.POST or None)
+    if request.method == 'POST' and form.is_valid():
+        user = form.save()
+        login(request, user)
+        return redirect('cabinet')
+    return render(request, 'studio/register.html', {'form': form})
 
 
 class IsOwnerOrOpen(permissions.BasePermission):
@@ -142,8 +177,23 @@ class TrackViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
+        if request.user.is_authenticated:
+            try:
+                plan = billing_service.check_quota(request.user)
+            except billing_service.QuotaExceeded as exc:
+                return Response(
+                    {'detail': str(exc), 'code': 'quota_exceeded',
+                     'billing': billing_service.summary(request.user)},
+                    status=status.HTTP_402_PAYMENT_REQUIRED)
+            # тариф решает, отдавать WAV или mp3 и звать ли Demucs
+            data['options'] = {**billing_service.render_options_for(plan), **data['options']}
+        elif getattr(settings, 'VIBETRACK_REQUIRE_LOGIN', False):
+            return Response({'detail': 'Войдите, чтобы обрабатывать треки.'},
+                            status=status.HTTP_401_UNAUTHORIZED)
+
         job = RenderJob.objects.create(track=track, prompt=data['prompt'],
                                        overrides=data['overrides'], options=data['options'])
+        billing_service.charge(request.user, job, note=data['prompt'][:200])
         async_result = render_track.delay(job.pk)
         RenderJob.objects.filter(pk=job.pk).update(celery_task_id=getattr(async_result, 'id', '') or '')
         job.refresh_from_db()
@@ -297,6 +347,59 @@ def capabilities(request):
             'max_duration_sec': settings.VIBETRACK['MAX_DURATION'],
         },
     })
+
+
+@api_view(['GET'])
+@permission_classes([permissions.AllowAny])
+def billing_summary(request):
+    """Тариф, остаток треков и витрина тарифов."""
+    return Response(billing_service.summary(request.user))
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def checkout(request):
+    """Создаёт платёж за тариф.
+
+    Реальный провайдер (ЮKassa и т.п.) подключается здесь: он должен вернуть
+    confirmation_url и подтвердить оплату своим вебхуком. Пока платёж
+    создаётся в статусе «ожидает» и подтверждается вручную в админке —
+    так деньги нельзя выдать себе, просто дёрнув эндпоинт.
+    """
+    plan_slug = request.data.get('plan', '')
+    plan = billing_service.PLANS.get(plan_slug)
+    if plan is None or plan.slug == 'free':
+        return Response({'detail': 'Неизвестный тариф.'}, status=status.HTTP_400_BAD_REQUEST)
+
+    payment = Payment.objects.create(user=request.user, plan=plan.slug,
+                                     amount_rub=plan.price_rub, provider='manual')
+    if getattr(settings, 'VIBETRACK_PAYMENTS_TEST_MODE', False):
+        activate_payment(payment)
+        return Response({'status': 'paid', 'payment': payment.pk,
+                         'billing': billing_service.summary(request.user)})
+    return Response({'status': 'pending', 'payment': payment.pk,
+                     'detail': f'Счёт на {plan.price_rub} ₽ создан. '
+                               'Оплата подтверждается после подключения платёжного провайдера.'},
+                    status=status.HTTP_202_ACCEPTED)
+
+
+def activate_payment(payment: Payment) -> Subscription:
+    """Отмечает платёж оплаченным и продлевает подписку."""
+    from datetime import timedelta
+
+    plan = billing_service.PLANS[payment.plan]
+    payment.status = Payment.STATUS_PAID
+    payment.paid_at = timezone.now()
+    payment.save(update_fields=['status', 'paid_at'])
+
+    current = Subscription.objects.filter(
+        user=payment.user, expires_at__gt=timezone.now()).order_by('-expires_at').first()
+    # продление добавляется к остатку, а не обнуляет его
+    start = current.expires_at if current else timezone.now()
+    days = 30 if plan.recurring else 30
+    return Subscription.objects.create(
+        user=payment.user, plan=plan.slug, started_at=start,
+        expires_at=start + timedelta(days=days), payment=payment)
 
 
 @api_view(['POST'])

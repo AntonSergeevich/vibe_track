@@ -11,6 +11,14 @@
   <h1>VIBE<span>TRACK</span></h1>
   <p class="tagline">Загрузи трек — получи ню-метал версию с дорожками, текстом, аккордами и табами</p>
   <div id="backends" class="backends"></div>
+  <div class="backends">
+    {% if user.is_authenticated %}
+      <a class="chip" href="{% url 'cabinet' %}">Кабинет · {{ user.username }}</a>
+    {% else %}
+      <a class="chip" href="{% url 'login' %}">Войти</a>
+      <a class="chip" href="{% url 'register' %}">Регистрация</a>
+    {% endif %}
+  </div>
 </header>
 
 <main>
@@ -49,6 +57,9 @@
       </label>
       <label>Агрессия <output id="aggr-out">0.75</output>
         <input type="range" id="aggression" min="0.2" max="1" step="0.05" value="0.75">
+      </label>
+      <label>Тональность <output id="transpose-out">как в оригинале</output>
+        <input type="range" id="transpose" min="-12" max="12" step="1" value="0">
       </label>
     </div>
 

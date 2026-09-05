@@ -1,0 +1,99 @@
+{% load static %}<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Кабинет — VibeTrack</title>
+<link rel="stylesheet" href="{% static 'studio/studio.css' %}">
+</head>
+<body>
+<header class="top">
+  <h1>VIBE<span>TRACK</span></h1>
+  <p class="tagline">Личный кабинет · {{ user.username }}</p>
+  <div class="backends">
+    <a class="chip" href="{% url 'studio' %}">← В студию</a>
+    <form method="post" action="{% url 'logout' %}" style="display:inline">
+      {% csrf_token %}<button type="submit" class="chip">Выйти</button>
+    </form>
+  </div>
+</header>
+
+<main>
+  <section class="card">
+    <h2><span class="num">1</span> Тариф</h2>
+    <div class="analysis">
+      <span>Сейчас: <b>{{ billing.plan.name }}</b></span>
+      <span>Треков в месяц: <b>{{ billing.plan.tracks }}</b></span>
+      <span>Использовано: <b>{{ billing.used }}</b></span>
+      <span>Осталось: <b>{{ billing.remaining }}</b></span>
+      {% if subscription %}<span>Действует до: <b>{{ subscription.expires_at|date:"d.m.Y" }}</b></span>{% endif %}
+    </div>
+
+    <h3>Сменить тариф</h3>
+    <div class="stems">
+      {% for plan in plans %}{% if plan.slug != 'free' %}
+      <div class="stem">
+        <div>
+          <div class="name">{{ plan.name }} — {{ plan.price_rub }} ₽{% if plan.recurring %}/мес{% endif %}</div>
+          <div class="lvl">{{ plan.tracks }} треков{% if plan.wav_stems %} · дорожки в WAV{% endif %}{% if plan.commercial %} · коммерческая лицензия{% endif %}</div>
+        </div>
+        <div></div>
+        <button class="btn buy" data-plan="{{ plan.slug }}">Выбрать</button>
+      </div>
+      {% endif %}{% endfor %}
+    </div>
+    <p id="checkout-result" class="hint"></p>
+  </section>
+
+  <section class="card">
+    <h2><span class="num">2</span> Мои треки</h2>
+    {% if jobs %}
+    <div class="stems">
+      {% for job in jobs %}
+      <div class="stem">
+        <div>
+          <div class="name">{{ job.track.title }}</div>
+          <div class="lvl">{{ job.created_at|date:"d.m.Y H:i" }} · {{ job.get_status_display }}{% if job.prompt %} · {{ job.prompt|truncatechars:60 }}{% endif %}</div>
+        </div>
+        {% if job.master %}<audio controls preload="none" src="{{ job.master.url }}"></audio>
+        <a class="btn" href="{{ job.master.url }}" download>↓</a>
+        {% else %}<div class="lvl">{{ job.error|truncatechars:80|default:"—" }}</div><div></div>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}<p class="hint">Пока пусто. <a href="{% url 'studio' %}">Загрузи первый трек</a>.</p>{% endif %}
+  </section>
+
+  <section class="card">
+    <h2><span class="num">3</span> Оплаты и списания</h2>
+    <h3>Платежи</h3>
+    {% if payments %}
+    <pre class="score">{% for p in payments %}{{ p.created_at|date:"d.m.Y H:i" }}  {{ p.amount_rub }} ₽  {{ p.plan }}  {{ p.get_status_display }}
+{% endfor %}</pre>
+    {% else %}<p class="hint">Платежей ещё не было.</p>{% endif %}
+
+    <h3>Списания</h3>
+    {% if usage %}
+    <pre class="score">{% for u in usage %}{{ u.created_at|date:"d.m.Y H:i" }}  {{ u.get_kind_display }}  трек #{{ u.job_id|default:"—" }}  {{ u.note|truncatechars:50 }}
+{% endfor %}</pre>
+    {% else %}<p class="hint">Списаний ещё не было.</p>{% endif %}
+  </section>
+</main>
+
+<footer><p>VibeTrack</p></footer>
+<script>
+document.querySelectorAll('.buy').forEach((btn) => btn.addEventListener('click', async () => {
+  const out = document.getElementById('checkout-result');
+  out.textContent = 'Создаю счёт…';
+  const res = await fetch('/api/billing/checkout/', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-CSRFToken': '{{ csrf_token }}'},
+    body: JSON.stringify({plan: btn.dataset.plan}),
+  });
+  const data = await res.json();
+  out.textContent = data.detail || (data.status === 'paid' ? 'Тариф активирован.' : 'Счёт создан.');
+  if (data.status === 'paid') setTimeout(() => location.reload(), 800);
+}));
+</script>
+</body>
+</html>

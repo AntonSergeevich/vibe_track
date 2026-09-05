@@ -1,0 +1,27 @@
+{% load static %}<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Регистрация — VibeTrack</title>
+<link rel="stylesheet" href="{% static 'studio/studio.css' %}">
+</head>
+<body>
+<header class="top"><h1>VIBE<span>TRACK</span></h1><p class="tagline">Создать аккаунт</p></header>
+<main>
+  <section class="card">
+    <form method="post">
+      {% csrf_token %}
+      {% for field in form %}
+        <label>{{ field.label }}
+          {{ field }}
+        </label>
+        {% if field.errors %}<p class="warnings">{{ field.errors|striptags }}</p>{% endif %}
+        {% if field.help_text %}<p class="hint">{{ field.help_text|safe }}</p>{% endif %}
+      {% endfor %}
+      <button class="primary" type="submit">Зарегистрироваться</button>
+    </form>
+    <p class="hint">Уже есть аккаунт? <a href="{% url 'login' %}">Войти</a></p>
+  </section>
+</main>
+</body>
+</html>

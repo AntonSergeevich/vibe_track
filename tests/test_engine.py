@@ -247,3 +247,29 @@ class TestFullPipeline(EngineTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+class TestTranspose(EngineTestCase):
+    """Смена тональности: и из описания, и регулятором."""
+
+    def test_prompt_parsing(self):
+        self.assertEqual(parse_prompt("ню-метал, на 2 полутона ниже").transpose, -2)
+        self.assertEqual(parse_prompt("ню-метал, на тон выше").transpose, 2)
+        self.assertEqual(parse_prompt("ню-метал, на полтона ниже").transpose, -1)
+        self.assertEqual(parse_prompt("ню-метал drop C").transpose, 0)
+
+    def test_override_wins(self):
+        self.assertEqual(parse_prompt("на тон выше", None, {"transpose": -5}).transpose, -5)
+
+    def test_riff_notes_move_with_key(self):
+        from engine.chords import transpose as transpose_chords
+
+        base = parse_prompt("ню-метал drop C", self.analysis)
+        power = to_power_chords(self.chords)
+        low = sequence(self.analysis, transpose_chords(power, -3), base)
+        high = sequence(self.analysis, transpose_chords(power, 2), base)
+
+        low_note = low.part("guitar_rhythm").notes[0]
+        high_note = high.part("guitar_rhythm").notes[0]
+        self.assertNotEqual(low_note.fret, high_note.fret,
+                            "сдвиг тональности должен менять лад, а не только звук")

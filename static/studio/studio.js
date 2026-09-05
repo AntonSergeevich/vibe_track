@@ -76,6 +76,11 @@
 
   /* --------------------------------------------------------------- рендер */
   $('#aggression').addEventListener('input', (e) => { $('#aggr-out').value = e.target.value; });
+  $('#transpose').addEventListener('input', (e) => {
+    const v = parseInt(e.target.value, 10);
+    $('#transpose-out').value = v === 0 ? 'как в оригинале'
+      : `${v > 0 ? '+' : ''}${v} полутон${Math.abs(v) === 1 ? '' : 'а'}`;
+  });
 
   function collectOverrides() {
     return {
@@ -83,6 +88,7 @@
       bass_tuning: $('#bass_tuning').value,
       groove: $('#groove').value,
       aggression: parseFloat($('#aggression').value),
+      transpose: parseInt($('#transpose').value, 10),
       instruments: [...document.querySelectorAll('input[name=instrument]:checked')].map((i) => i.value),
       vocals: {
         male: $('#v-male').checked,

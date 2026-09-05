@@ -17,13 +17,14 @@ from .analysis import TrackAnalysis, analyze
 from .arrangement import ArrangementSpec, parse_prompt
 from .llm import refine as llm_refine
 from .audio_io import Audio, load, save
-from .chords import ChordEvent, recognize, to_power_chords
+from .chords import ChordEvent, recognize, to_power_chords, transpose as transpose_chords
 from .mixing import MixSettings, build_gains, mixdown, stem_report
 from .rendering import render_arrangement
 from .separation import separate
 from .sequencer import Arrangement, sequence
 from .tabs import chord_chart, render_tab, tab_for_all
 from .transcription import Lyrics, lyric_sheet, lyrics_from_text, transcribe
+from .dsp import formant_shift, pitch_shift
 from .vocals import VocalTakeResult, harmony, process_take
 
 logger = logging.getLogger(__name__)
@@ -149,7 +150,10 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
     spec = parse_prompt(prompt, analysis, overrides)
     if options.use_llm:
         spec = llm_refine(spec, prompt, analysis, user_overrides=overrides)
-    arrangement = sequence(analysis, to_power_chords(chords), spec)
+    riff_chords = to_power_chords(chords)
+    if spec.transpose:
+        riff_chords = transpose_chords(riff_chords, spec.transpose)
+    arrangement = sequence(analysis, riff_chords, spec)
     timer.mark("arrange")
 
     _progress("render", 60)
@@ -207,6 +211,12 @@ def _rework_source_vocals(vocals: Audio, spec: ArrangementSpec,
     """Вокал исходника вписываем в новую аранжировку согласно спецификации."""
     out: dict[str, Audio] = {}
     v = spec.vocals
+    if spec.transpose:
+        # вокал едет за тональностью, иначе он разойдётся с гитарами;
+        # форманты подтягиваем обратно, чтобы голос не стал мультяшным
+        shifted = pitch_shift(vocals.data, spec.transpose, vocals.sr)
+        shifted = formant_shift(shifted, -spec.transpose * 0.35, vocals.sr)
+        vocals = Audio(shifted, vocals.sr)
     if v.male:
         res = process_take(vocals, style=v.male_style, analysis=analysis,
                            autotune_strength=1.0 if v.autotune else None)

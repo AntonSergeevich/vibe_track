@@ -120,6 +120,14 @@ AUTH_USER_MODEL = 'core.User'
 DATA_UPLOAD_MAX_MEMORY_SIZE = int(os.getenv("DATA_UPLOAD_MAX_MEMORY_SIZE", 5 * 1024 * 1024))
 FILE_UPLOAD_MAX_MEMORY_SIZE = DATA_UPLOAD_MAX_MEMORY_SIZE
 VIBETRACK_MAX_UPLOAD_MB = int(os.getenv("VIBETRACK_MAX_UPLOAD_MB", 80))
+# Требовать вход для обработки треков (в проде — да, локально удобнее без)
+VIBETRACK_REQUIRE_LOGIN = env_bool("VIBETRACK_REQUIRE_LOGIN", False)
+# Тестовый режим оплаты: покупка тарифа активируется сразу, без провайдера
+VIBETRACK_PAYMENTS_TEST_MODE = env_bool("VIBETRACK_PAYMENTS_TEST_MODE", False)
+
+LOGIN_URL = '/accounts/login/'
+LOGIN_REDIRECT_URL = '/cabinet/'
+LOGOUT_REDIRECT_URL = '/'
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [

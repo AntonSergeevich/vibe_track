@@ -4,7 +4,7 @@ from rest_framework.routers import DefaultRouter
 
 from .views import (AudioFileViewSet, BillingViewSet, EffectChainViewSet, ProjectViewSet,
                     RenderJobViewSet, TrackViewSet, UserViewSet, VocalTakeViewSet,
-                    capabilities, parse_description)
+                    billing_summary, capabilities, checkout, parse_description)
 
 router = DefaultRouter()
 router.register(r'projects', ProjectViewSet, basename='project')
@@ -18,6 +18,8 @@ router.register(r'users', UserViewSet, basename='user')
 
 urlpatterns = [
     path('capabilities/', capabilities, name='capabilities'),
+    path('billing/summary/', billing_summary, name='billing-summary'),
+    path('billing/checkout/', checkout, name='billing-checkout'),
     path('parse-description/', parse_description, name='parse-description'),
     path('', include(router.urls)),
 ]

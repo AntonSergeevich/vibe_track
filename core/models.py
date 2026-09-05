@@ -5,6 +5,7 @@
 """
 from django.contrib.auth.models import AbstractUser
 from django.db import models
+from django.utils import timezone
 
 
 class User(AbstractUser):
@@ -178,6 +179,83 @@ class VocalTake(models.Model):
 
     def __str__(self):
         return f"VocalTake #{self.pk} ({self.style})"
+
+
+class Subscription(models.Model):
+    """Активная подписка пользователя на тариф."""
+
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='subscriptions')
+    plan = models.CharField(max_length=20)          # slug из core.billing.PLANS
+    started_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+    auto_renew = models.BooleanField(default=False)
+    payment = models.ForeignKey('Payment', on_delete=models.SET_NULL, null=True, blank=True,
+                                related_name='subscriptions')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-expires_at']
+
+    def __str__(self):
+        return f"{self.user}: {self.plan} до {self.expires_at:%d.%m.%Y}"
+
+    @property
+    def is_active(self) -> bool:
+        return self.expires_at > timezone.now()
+
+
+class UsageRecord(models.Model):
+    """Списание или возврат одного рендера."""
+
+    KIND_CHARGE = 'charge'
+    KIND_REFUND = 'refund'
+    KIND_CHOICES = [(KIND_CHARGE, 'Списание'), (KIND_REFUND, 'Возврат')]
+
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='usage')
+    job = models.ForeignKey('RenderJob', on_delete=models.SET_NULL, null=True, blank=True,
+                            related_name='usage')
+    kind = models.CharField(max_length=10, choices=KIND_CHOICES, default=KIND_CHARGE)
+    plan = models.CharField(max_length=20, blank=True)
+    note = models.CharField(max_length=200, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [models.Index(fields=['user', 'created_at'])]
+
+    def __str__(self):
+        return f"{self.get_kind_display()} #{self.job_id} ({self.user})"
+
+
+class Payment(models.Model):
+    """Платёж за тариф. Провайдер подключается через webhook."""
+
+    STATUS_PENDING = 'pending'
+    STATUS_PAID = 'paid'
+    STATUS_FAILED = 'failed'
+    STATUS_REFUNDED = 'refunded'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Ожидает оплаты'),
+        (STATUS_PAID, 'Оплачен'),
+        (STATUS_FAILED, 'Не прошёл'),
+        (STATUS_REFUNDED, 'Возвращён'),
+    ]
+
+    user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='payments')
+    plan = models.CharField(max_length=20)
+    amount_rub = models.IntegerField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    provider = models.CharField(max_length=30, blank=True)      # yookassa, robokassa, ...
+    external_id = models.CharField(max_length=120, blank=True)  # id платежа у провайдера
+    confirmation_url = models.URLField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    paid_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.amount_rub} ₽ за {self.plan} ({self.get_status_display()})"
 
 
 class EffectChain(models.Model):
