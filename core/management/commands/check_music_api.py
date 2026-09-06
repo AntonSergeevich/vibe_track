@@ -21,9 +21,12 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("track", nargs="?", default="we_angel.mp3",
                             help="исходный трек для пробы")
-        parser.add_argument("--seconds", type=float, default=20.0,
-                            help="сколько секунд отправить (короче — дешевле)")
-        parser.add_argument("--prompt", default="aggressive nu metal, downtuned guitars, heavy drums")
+        parser.add_argument("--seconds", type=float, default=0.0,
+                            help="сколько секунд отправить; 0 — весь трек "
+                                 "(вызов стоит одинаково при любой длине)")
+        parser.add_argument("--prompt", default=generation.style_prompt_for("nu_metal"),
+                            help="описание стиля; по умолчанию — тот же промпт, "
+                                 "что уходит из студии")
         parser.add_argument("--strength", default="")
         parser.add_argument("--out", default="cover_test.mp3")
 
@@ -43,18 +46,24 @@ class Command(BaseCommand):
 
         if options["strength"]:
             os.environ["VIBETRACK_STABILITY_STRENGTH"] = options["strength"]
-        os.environ["VIBETRACK_STABILITY_MAX_SECONDS"] = str(options["seconds"])
-
         source = load(options["track"])
-        self.stdout.write(f"Исходник: {source.duration:.0f} с, отправляем первые "
-                          f"{options['seconds']:.0f} с")
+        # цена не зависит от длины, поэтому по умолчанию слушаем весь трек:
+        # на двадцати секундах не видно ни куплета, ни припева
+        limit = float(os.getenv("VIBETRACK_STABILITY_MAX_SECONDS", "180"))
+        seconds = min(options["seconds"] or source.duration, limit)
+        os.environ["VIBETRACK_STABILITY_MAX_SECONDS"] = str(seconds)
+
+        self.stdout.write(f"Исходник: {source.duration:.0f} с, отправляем "
+                          f"{seconds:.0f} с")
+        self.stdout.write(f"Сила переделки: "
+                          f"{os.getenv('VIBETRACK_STABILITY_STRENGTH', '0.6')}")
         self.stdout.write(f"Промпт: {options['prompt']}")
         self.stdout.write("\nЗапрос пошёл…")
 
         started = time.time()
         result = generation.generate_cover(generation.CoverRequest(
             source_path=options["track"], style_prompt=options["prompt"],
-            duration=options["seconds"]))
+            duration=seconds))
         elapsed = time.time() - started
 
         if not result.ok:

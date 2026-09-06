@@ -627,6 +627,21 @@ class TestStabilityProvider(unittest.TestCase):
                          "длительность ограничена лимитом провайдера")
         self.assertIn("strength", call["data"])
 
+    def test_prompt_asks_to_keep_the_song(self):
+        """Без этой просьбы модель играет «мясо» с первой секунды.
+
+        Человек принёс свой трек ради своей мелодии — промпт обязан её
+        защищать, иначе на выходе чужая песня в нужном жанре.
+        """
+        from engine.generation import style_prompt_for
+
+        for genre in ("nu_metal", "grunge", "trap_metal", "неизвестный"):
+            prompt = style_prompt_for(genre)
+            self.assertIn("original melody", prompt, genre)
+            self.assertIn("song structure", prompt, genre)
+            self.assertIn("quiet intro stays quiet", prompt,
+                          "тихое вступление не должно превращаться в риф")
+
     def test_steps_stay_inside_the_accepted_range(self):
         """stable-audio-2 принимает steps только 30-100.
 

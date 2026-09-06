@@ -137,8 +137,9 @@ def stability_generate(request: CoverRequest, session=None) -> Audio:
                 files={"audio": fh},
                 data={
                     "prompt": request.style_prompt,
-                    # 0.6-0.75 — ближе к оригиналу, 0.85-0.9 — сильнее переделка
-                    "strength": os.getenv("VIBETRACK_STABILITY_STRENGTH", "0.75"),
+                    # 0.5-0.6 — слышно исходную игру, 0.85-0.9 — от оригинала
+                    # остаётся только темп: модель играет своё «мясо»
+                    "strength": os.getenv("VIBETRACK_STABILITY_STRENGTH", "0.6"),
                     "duration": duration,
                     "output_format": os.getenv("VIBETRACK_STABILITY_FORMAT", "mp3"),
                     # stable-audio-2 принимает только 30-100: меньше — отказ 400
@@ -294,6 +295,14 @@ def _poll(session, headers: dict, config: dict, submitted: dict) -> str:
     raise TimeoutError("Провайдер не ответил за отведённое время")
 
 
+# Модель охотно выкидывает исходную музыку и играет «мясо» с первой секунды.
+# Эта приписка возвращает ей то, ради чего человек и принёс свой трек:
+# его мелодию, гармонию и форму песни — включая тихое вступление.
+FAITHFUL_SUFFIX = ("follow the original melody, chord progression and song structure, "
+                   "keep the dynamics of the source: quiet intro stays quiet, "
+                   "heavy sections hit hard")
+
+
 def style_prompt_for(genre: str, spec_notes: str = "") -> str:
     """Текстовое описание стиля на английском — его понимают все сервисы."""
     prompts = {
@@ -307,4 +316,4 @@ def style_prompt_for(genre: str, spec_notes: str = "") -> str:
         "hard_rock": "classic hard rock, riff driven, live drums",
     }
     base = prompts.get(genre, "heavy rock with distorted guitars")
-    return f"{base}. {spec_notes}".strip()
+    return f"{base}. {FAITHFUL_SUFFIX}. {spec_notes}".strip().rstrip(".") + "."
