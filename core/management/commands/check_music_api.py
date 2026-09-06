@@ -60,6 +60,11 @@ class Command(BaseCommand):
         if not result.ok:
             self.stdout.write(self.style.ERROR(f"\nНе получилось за {elapsed:.0f} с:"))
             self.stdout.write(result.error)
+            if "No module named" in result.error:
+                # до провайдера дело даже не дошло — это окружение, а не API
+                raise CommandError(
+                    "Не хватает библиотеки в venv. Поставьте зависимости:\n"
+                    "    pip install -r requirements.txt")
             self.stdout.write(
                 "\nЧто обычно значат ответы:\n"
                 "  401 / 403 — ключ неверный или не активирован\n"
