@@ -152,6 +152,8 @@ CELERY_TASK_TIME_LIMIT = int(os.getenv('CELERY_TASK_TIME_LIMIT', 3600))
 CELERY_WORKER_MAX_TASKS_PER_CHILD = 8   # рендер держит память — перезапускаем воркер
 # Без брокера (локальная разработка, тесты) задачи выполняются синхронно
 CELERY_TASK_ALWAYS_EAGER = env_bool('CELERY_TASK_ALWAYS_EAGER', False)
+# Без Redis: выполнять задачи в фоновом потоке, чтобы работала полоса прогресса
+VIBETRACK_INLINE_WORKER = env_bool('VIBETRACK_INLINE_WORKER', False)
 CELERY_TASK_EAGER_PROPAGATES = True
 
 # ------------------------------------------------------------- Аудиодвижок

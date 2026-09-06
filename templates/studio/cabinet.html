@@ -2,20 +2,26 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Кабинет — VibeTrack</title>
+<link rel="icon" href="{% static 'studio/favicon.svg' %}" type="image/svg+xml">
+<meta name="theme-color" content="#0b0b0f">
 <link rel="stylesheet" href="{% static 'studio/studio.css' %}">
 </head>
 <body>
-<header class="top">
-  <h1>VIBE<span>TRACK</span></h1>
-  <p class="tagline">Личный кабинет · {{ user.username }}</p>
-  <div class="backends">
-    <a class="chip" href="{% url 'studio' %}">← В студию</a>
+<header class="site-header">
+  <a class="logo" href="{% url 'studio' %}">
+    {% include 'studio/_logo.html' %}
+    <span class="logo-text">VIBE<span>TRACK</span></span>
+  </a>
+  <div class="header-spacer"></div>
+  <div class="header-links">
+    <a class="chip" href="{% url 'studio' %}">В студию</a>
     <form method="post" action="{% url 'logout' %}" style="display:inline">
       {% csrf_token %}<button type="submit" class="chip">Выйти</button>
     </form>
   </div>
+  <p class="tagline">Личный кабинет · {{ user.username }}</p>
 </header>
 
 <main>

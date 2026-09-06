@@ -42,20 +42,24 @@ class VocalChainPreset:
     target_db: float = -16.0
 
 
+# Пресеты намеренно сухие. Реверберация и автотюн — то, что слышно первым и
+# раздражает первым: голос «в бочке» и «затюненный» ломают доверие к треку
+# быстрее, чем любой другой дефект. Кому нужно больше — прибавит вручную.
 PRESETS: dict[str, VocalChainPreset] = {
-    "rap": VocalChainPreset(hpf=110, deess_db=-6, presence_db=5, comp_threshold=-22,
-                            comp_ratio=5.5, drive=1.4, delay_mix=0.1, reverb_mix=0.08,
-                            doubling=0.35, target_db=-14.5),
-    "scream": VocalChainPreset(hpf=130, gate_db=-38, deess_db=-3, presence_db=4,
-                               comp_threshold=-24, comp_ratio=7.0, drive=2.6,
-                               delay_mix=0.16, reverb_mix=0.2, doubling=0.5, target_db=-14.0),
-    "clean": VocalChainPreset(hpf=85, deess_db=-6, presence_db=3, body_db=2.0,
-                              comp_threshold=-19, comp_ratio=3.5, drive=0.8,
-                              delay_mix=0.18, reverb_mix=0.24, doubling=0.25,
-                              autotune=0.5, target_db=-15.5),
-    "whisper": VocalChainPreset(hpf=140, gate_db=-48, presence_db=6, comp_threshold=-26,
-                                comp_ratio=6.0, drive=0.6, delay_mix=0.22, reverb_mix=0.3,
-                                target_db=-19.0),
+    "rap": VocalChainPreset(hpf=110, deess_db=-6, presence_db=4, comp_threshold=-22,
+                            comp_ratio=5.0, drive=1.2, delay_mix=0.05, reverb_mix=0.03,
+                            doubling=0.2, autotune=0.0, target_db=-14.5),
+    "scream": VocalChainPreset(hpf=130, gate_db=-38, deess_db=-3, presence_db=3.5,
+                               comp_threshold=-24, comp_ratio=6.0, drive=2.0,
+                               delay_mix=0.07, reverb_mix=0.06, doubling=0.3,
+                               autotune=0.0, target_db=-14.0),
+    "clean": VocalChainPreset(hpf=85, deess_db=-6, presence_db=2.5, body_db=1.5,
+                              comp_threshold=-19, comp_ratio=3.0, drive=0.6,
+                              delay_mix=0.06, reverb_mix=0.07, doubling=0.15,
+                              autotune=0.0, target_db=-15.5),
+    "whisper": VocalChainPreset(hpf=140, gate_db=-48, presence_db=5, comp_threshold=-26,
+                                comp_ratio=5.0, drive=0.5, delay_mix=0.10, reverb_mix=0.10,
+                                autotune=0.0, target_db=-19.0),
 }
 
 # Ориентировочные сдвиги для «перекраски» голоса по полу

@@ -2,16 +2,20 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>VibeTrack — студия ню-метала</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0f">
+<title>VibeTrack — студия переработки треков</title>
+<link rel="icon" href="{% static 'studio/favicon.svg' %}" type="image/svg+xml">
 <link rel="stylesheet" href="{% static 'studio/studio.css' %}">
 </head>
 <body>
-<header class="top">
-  <h1>VIBE<span>TRACK</span></h1>
-  <p class="tagline">Загрузи трек — получи ню-метал версию с дорожками, текстом, аккордами и табами</p>
-  <div id="backends" class="backends"></div>
-  <div class="backends">
+<header class="site-header">
+  <a class="logo" href="{% url 'studio' %}">
+    {% include 'studio/_logo.html' %}
+    <span class="logo-text">VIBE<span>TRACK</span></span>
+  </a>
+  <div class="header-spacer"></div>
+  <div class="header-links">
     {% if user.is_authenticated %}
       <a class="chip" href="{% url 'cabinet' %}">Кабинет · {{ user.username }}</a>
     {% else %}
@@ -19,82 +23,116 @@
       <a class="chip" href="{% url 'register' %}">Регистрация</a>
     {% endif %}
   </div>
+  <p class="tagline" id="backends">Загрузи трек — получи новую версию с дорожками, аккордами и табами</p>
 </header>
 
 <main>
-  <!-- 1. Загрузка -->
+  <!-- 1. Трек -->
   <section class="card" id="step-upload">
-    <h2><span class="num">1</span> Исходный трек</h2>
+    <h2><span class="num">1</span> Загрузи трек</h2>
+    <p class="sub">mp3, wav, flac, ogg, m4a — до {{ max_upload_mb }} МБ</p>
+
     <div id="dropzone" class="dropzone">
       <input type="file" id="file" accept="audio/*" hidden>
-      <p>Перетащи аудиофайл сюда или <button type="button" class="link" id="pick">выбери файл</button></p>
-      <small>mp3, wav, flac, ogg, m4a — до {{ max_upload_mb }} МБ</small>
+      <p>Перетащи файл сюда</p>
+      <small>или <button type="button" class="link" id="pick">выбери на устройстве</button></small>
     </div>
-    <div id="track-info" class="track-info hidden"></div>
+
+    <div id="upload-progress" class="progress hidden">
+      <div class="bar"><span></span></div>
+      <p class="stage"><span id="upload-name">Загрузка…</span><b id="upload-pct">0%</b></p>
+    </div>
+
+    <div id="track-chip" class="track-chip hidden">
+      <div style="flex:1;min-width:0">
+        <div class="name" id="track-name"></div>
+        <div class="meta" id="track-meta"></div>
+      </div>
+      <button type="button" class="btn small" id="change-track">Заменить</button>
+    </div>
   </section>
 
-  <!-- 2. Описание аранжировки -->
-  <section class="card" id="step-spec">
-    <h2><span class="num">2</span> Каким должен стать трек</h2>
-    <textarea id="prompt" rows="3" placeholder="Например: ню-метал в духе Korn, семиструнная гитара в drop A, пятиструнный бас, скретчи и бонго, мужская читка в куплете и женский чистый вокал в припеве, 95 bpm"></textarea>
-    <div class="chips" id="refs"></div>
+  <!-- 2. Стиль -->
+  <section class="card hidden" id="step-style">
+    <h2><span class="num">2</span> Выбери стиль</h2>
+    <p class="sub">Стиль задаёт строй, грув, набор инструментов и подачу вокала</p>
 
-    <div class="grid">
-      <label>Строй гитары
-        <select id="tuning">
-          {% for key, label in tunings.items %}<option value="{{ key }}">{{ key }} — {{ label }}</option>{% endfor %}
-        </select>
-      </label>
-      <label>Строй баса
-        <select id="bass_tuning">
-          {% for key, label in bass_tunings.items %}<option value="{{ key }}">{{ key }} — {{ label }}</option>{% endfor %}
-        </select>
-      </label>
-      <label>Грув
-        <select id="groove">
-          {% for g in grooves %}<option value="{{ g }}">{{ g }}</option>{% endfor %}
-        </select>
-      </label>
-      <label>Агрессия <output id="aggr-out">0.75</output>
-        <input type="range" id="aggression" min="0.2" max="1" step="0.05" value="0.75">
-      </label>
-      <label>Тональность <output id="transpose-out">как в оригинале</output>
-        <input type="range" id="transpose" min="-12" max="12" step="1" value="0">
-      </label>
+    <div class="genres" id="genres">
+      {% for key, g in genres.items %}
+      <button type="button" class="genre{% if key == 'nu_metal' %} active{% endif %}" data-genre="{{ key }}">
+        <b>{{ g.label }}</b><span>{{ g.hint }}</span>
+      </button>
+      {% endfor %}
     </div>
 
-    <fieldset>
-      <legend>Инструменты</legend>
-      <div class="instruments">
-        {% for key, meta in instruments.items %}
-        <label class="pill"><input type="checkbox" name="instrument" value="{{ key }}"
-          {% if meta.default %}checked{% endif %}> {{ meta.label }}</label>
-        {% endfor %}
-      </div>
-    </fieldset>
-
-    <fieldset>
-      <legend>Вокал</legend>
-      <div class="grid">
-        <label class="pill"><input type="checkbox" id="v-male" checked> Мужской</label>
-        <label>Стиль мужского
-          <select id="v-male-style">{% for s in vocal_styles %}<option value="{{ s }}">{{ s }}</option>{% endfor %}</select>
-        </label>
-        <label class="pill"><input type="checkbox" id="v-female"> Женский</label>
-        <label>Стиль женского
-          <select id="v-female-style">{% for s in vocal_styles %}<option value="{{ s }}"{% if s == 'clean' %} selected{% endif %}>{{ s }}</option>{% endfor %}</select>
-        </label>
-      </div>
-      <label class="pill"><input type="checkbox" id="v-autotune"> Автотюн по тональности</label>
-    </fieldset>
-
     <details>
-      <summary>Текст песни (если Whisper не установлен — впиши вручную, аккорды подставятся сами)</summary>
-      <textarea id="manual-lyrics" rows="5" placeholder="Строка за строкой…"></textarea>
+      <summary>Тонкая настройка</summary>
+
+      <label style="margin-top:12px">Описание словами — что именно сделать
+        <textarea id="prompt" rows="2" placeholder="например: семиструнка в drop A, скретчи, женский вокал в припеве, на тон ниже"></textarea>
+      </label>
+
+      <div class="grid">
+        <label>Строй гитары
+          <select id="tuning">
+            {% for key, label in tunings.items %}<option value="{{ key }}">{{ key }} — {{ label }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Строй баса
+          <select id="bass_tuning">
+            {% for key, label in bass_tunings.items %}<option value="{{ key }}">{{ key }} — {{ label }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Грув
+          <select id="groove">{% for g in grooves %}<option value="{{ g }}">{{ g }}</option>{% endfor %}</select>
+        </label>
+        <label>Агрессия <output id="aggr-out">0.8</output>
+          <input type="range" id="aggression" min="0.2" max="1" step="0.05" value="0.8">
+        </label>
+        <label>Тональность <output id="transpose-out">как в оригинале</output>
+          <input type="range" id="transpose" min="-12" max="12" step="1" value="0">
+        </label>
+      </div>
+
+      <fieldset>
+        <legend>Инструменты</legend>
+        <div class="instruments">
+          {% for key, meta in instruments.items %}
+          <label class="pill"><input type="checkbox" name="instrument" value="{{ key }}"
+            {% if meta.default %}checked{% endif %}> {{ meta.label }}</label>
+          {% endfor %}
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Вокал</legend>
+        <div class="instruments" style="margin-bottom:10px">
+          <label class="pill"><input type="checkbox" id="v-male" checked> Мужской</label>
+          <label class="pill"><input type="checkbox" id="v-female"> Женский</label>
+          <label class="pill"><input type="checkbox" id="v-autotune"> Автотюн</label>
+          <label class="pill"><input type="checkbox" id="v-harmony"> Бэк-вокал</label>
+        </div>
+        <div class="grid">
+          <label>Стиль мужского
+            <select id="v-male-style">{% for s in vocal_styles %}<option value="{{ s }}">{{ s }}</option>{% endfor %}</select>
+          </label>
+          <label>Стиль женского
+            <select id="v-female-style">{% for s in vocal_styles %}<option value="{{ s }}"{% if s == 'clean' %} selected{% endif %}>{{ s }}</option>{% endfor %}</select>
+          </label>
+        </div>
+      </fieldset>
+
+      <label>Текст песни вручную — если распознавание недоступно
+        <textarea id="manual-lyrics" rows="4" placeholder="Строка за строкой…"></textarea>
+      </label>
     </details>
 
-    <button id="run" class="primary" disabled>Сделать ню-метал</button>
-    <div id="progress" class="progress hidden"><div class="bar"><span></span></div><p class="stage"></p></div>
+    <button id="run" class="primary" style="margin-top:16px">Создать трек</button>
+
+    <div id="progress" class="progress hidden">
+      <div class="bar"><span></span></div>
+      <p class="stage"><span id="stage-name">В очереди</span><b id="stage-pct">0%</b></p>
+    </div>
   </section>
 
   <!-- 3. Результат -->
@@ -103,20 +141,20 @@
     <div id="warnings" class="warnings"></div>
     <div class="master">
       <audio id="master" controls preload="metadata"></audio>
-      <a id="master-dl" class="btn" download>Скачать мастер</a>
+      <a id="master-dl" class="btn small" download>Скачать</a>
     </div>
     <div id="analysis" class="analysis"></div>
     <h3>Дорожки</h3>
     <div id="stems" class="stems"></div>
-    <h3>Партитура</h3>
+    <h3>Аккорды, текст и табы</h3>
     <div class="tabs-nav" id="score-nav"></div>
     <pre id="score-view" class="score"></pre>
   </section>
 
-  <!-- 4. Запись голоса -->
+  <!-- 4. Свой голос -->
   <section class="card hidden" id="step-vocal">
     <h2><span class="num">4</span> Записать свой голос</h2>
-    <p class="hint">Надень наушники: микрофон пишется поверх минусовки, задержка компенсируется автоматически.</p>
+    <p class="sub">Надень наушники: задержка записи компенсируется автоматически</p>
     <div class="grid">
       <label>Стиль
         <select id="take-style">{% for s in vocal_styles %}<option value="{{ s }}">{{ s }}</option>{% endfor %}</select>
@@ -127,21 +165,21 @@
       <label>Перекрасить в
         <select id="take-target"><option value="">не менять</option><option value="female">женский</option><option value="male">мужской</option></select>
       </label>
-      <label>Автотюн <output id="take-at-out">авто</output>
+      <label>Автотюн <output id="take-at-out">выключен</output>
         <input type="range" id="take-autotune" min="-1" max="1" step="0.1" value="-1">
       </label>
     </div>
     <div class="rec-row">
-      <button id="rec" class="primary">● Записать</button>
+      <button id="rec" class="secondary">● Записать</button>
       <button id="stop" class="secondary" disabled>■ Стоп</button>
       <span id="rec-time" class="rec-time">00:00</span>
-      <label class="pill"><input type="checkbox" id="play-along" checked> Играть минусовку</label>
+      <label class="pill"><input type="checkbox" id="play-along" checked> Минусовка в наушниках</label>
     </div>
     <div id="take-result" class="take-result"></div>
   </section>
 </main>
 
-<footer><p>VibeTrack · Django + Celery + собственный DSP-движок</p></footer>
+<footer><p>VibeTrack · дорожки, аккорды и табы из твоего трека</p></footer>
 
 <script>window.CSRF_TOKEN = "{{ csrf_token }}";</script>
 <script src="{% static 'studio/studio.js' %}"></script>

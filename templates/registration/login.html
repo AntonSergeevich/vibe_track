@@ -1,22 +1,37 @@
 {% load static %}<!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0f">
 <title>Вход — VibeTrack</title>
+<link rel="icon" href="{% static 'studio/favicon.svg' %}" type="image/svg+xml">
 <link rel="stylesheet" href="{% static 'studio/studio.css' %}">
 </head>
 <body>
-<header class="top"><h1>VIBE<span>TRACK</span></h1><p class="tagline">Вход в кабинет</p></header>
-<main>
+<header class="site-header">
+  <a class="logo" href="{% url 'studio' %}">
+    {% include 'studio/_logo.html' %}
+    <span class="logo-text">VIBE<span>TRACK</span></span>
+  </a>
+</header>
+
+<div class="auth">
   <section class="card">
-    <form method="post">
+    <h2>Вход</h2>
+    <form method="post" novalidate>
       {% csrf_token %}
-      {% for field in form %}<label>{{ field.label }}{{ field }}</label>{% endfor %}
-      {% if form.errors %}<p class="warnings">Неверное имя пользователя или пароль.</p>{% endif %}
+      {% if form.errors %}<ul class="errorlist"><li>Неверное имя пользователя или пароль</li></ul>{% endif %}
+      {% for field in form %}
+        <div>
+          <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+          {{ field }}
+        </div>
+      {% endfor %}
       <button class="primary" type="submit">Войти</button>
     </form>
     <p class="hint">Нет аккаунта? <a href="{% url 'register' %}">Зарегистрироваться</a></p>
   </section>
-</main>
+</div>
 </body>
 </html>

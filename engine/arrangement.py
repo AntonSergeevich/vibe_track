@@ -91,6 +91,73 @@ VOCAL_STYLE_KEYWORDS = {
     "whisper": ("шёпот", "шепот", "whisper"),
 }
 
+# Жанры. Честно говоря, это варианты одного движка: меняются грув, строй,
+# набор инструментов, плотность и характер вокала. Разные жанры звучат
+# по-разному, но это не разные продакшены — общий синтез остаётся общим.
+GENRES: dict[str, dict] = {
+    "nu_metal": {
+        "label": "Ню-метал", "hint": "Korn, Limp Bizkit — синкопы, дроп-строй, читка",
+        "groove": "syncopated", "tuning": "drop_c", "bass_tuning": "bass_5",
+        "aggression": 0.8, "density": 0.75, "instruments": ["turntables", "percussion"],
+        "male_style": "rap", "female_style": "clean",
+    },
+    "metalcore": {
+        "label": "Металкор", "hint": "плотные чаги, скрим в куплете, чистый припев",
+        "groove": "driving", "tuning": "drop_b", "bass_tuning": "bass_5",
+        "aggression": 0.95, "density": 0.9, "instruments": ["guitar_lead"],
+        "male_style": "scream", "female_style": "clean",
+    },
+    "alt_rock": {
+        "label": "Альт-рок", "hint": "Linkin Park — мелодика, пэды, умеренный вес",
+        "groove": "driving", "tuning": "drop_d", "bass_tuning": "bass_standard",
+        "aggression": 0.55, "density": 0.6, "instruments": ["synth_pad", "guitar_lead"],
+        "male_style": "clean", "female_style": "clean",
+    },
+    "grunge": {
+        "label": "Гранж", "hint": "Nirvana, Soundgarden — грязный тон, свободная подача",
+        "groove": "halftime", "tuning": "drop_d", "bass_tuning": "bass_standard",
+        "aggression": 0.6, "density": 0.5, "instruments": [],
+        "male_style": "clean", "female_style": "clean",
+    },
+    "punk": {
+        "label": "Панк", "hint": "быстро, прямо, без лишнего",
+        "groove": "driving", "tuning": "standard_e", "bass_tuning": "bass_standard",
+        "aggression": 0.7, "density": 0.95, "instruments": [],
+        "male_style": "clean", "female_style": "clean",
+    },
+    "industrial": {
+        "label": "Индастриал", "hint": "Rammstein, NIN — машинный грув, синт-стэбы",
+        "groove": "driving", "tuning": "drop_c", "bass_tuning": "bass_5",
+        "aggression": 0.85, "density": 0.8,
+        "instruments": ["synth_stab", "synth_pad"],
+        "male_style": "scream", "female_style": "clean",
+    },
+    "trap_metal": {
+        "label": "Трэп-метал", "hint": "рваный бит, читка, редкие тяжёлые гитары",
+        "groove": "halftime", "tuning": "drop_a_7", "bass_tuning": "bass_5_drop_a",
+        "aggression": 0.7, "density": 0.45, "instruments": ["synth_stab", "turntables"],
+        "male_style": "rap", "female_style": "rap",
+    },
+    "hard_rock": {
+        "label": "Хард-рок", "hint": "классический риффовый рок без дроп-строя",
+        "groove": "bounce", "tuning": "standard_e", "bass_tuning": "bass_standard",
+        "aggression": 0.5, "density": 0.6, "instruments": ["guitar_lead"],
+        "male_style": "clean", "female_style": "clean",
+    },
+}
+
+GENRE_KEYWORDS = {
+    "nu_metal": ("ню-метал", "ню метал", "nu-metal", "nu metal", "нюметал"),
+    "metalcore": ("металкор", "metalcore", "дэткор", "deathcore"),
+    "alt_rock": ("альт-рок", "альтернатив", "alt-rock", "alternative"),
+    "grunge": ("гранж", "grunge"),
+    "punk": ("панк", "punk"),
+    "industrial": ("индастриал", "industrial", "раммштайн", "rammstein"),
+    "trap_metal": ("трэп", "трап", "trap"),
+    "hard_rock": ("хард-рок", "хард рок", "hard rock", "классический рок"),
+}
+
+
 REFERENCE_ARTISTS = {
     "korn": {"groove": "syncopated", "tuning": "drop_a_7", "instruments": ["percussion"], "aggression": 0.8},
     "корн": {"groove": "syncopated", "tuning": "drop_a_7", "instruments": ["percussion"], "aggression": 0.8},
@@ -130,7 +197,7 @@ class VocalSpec:
     female_style: str = "clean"
     male_sections: list[str] = field(default_factory=lambda: ["verse", "break"])
     female_sections: list[str] = field(default_factory=lambda: ["chorus"])
-    harmony: bool = True
+    harmony: bool = False        # бэк-вокал только по явной просьбе
     doubling: bool = True
     autotune: bool = False
 
@@ -146,6 +213,7 @@ class ArrangementSpec:
     mode: str = "minor"
     tuning: str = "drop_c"
     bass_tuning: str = "bass_5"
+    genre: str = "nu_metal"
     groove: str = "syncopated"
     aggression: float = 0.75          # 0..1 — гейн, плотность, скорость
     density: float = 0.7              # плотность нот в риффе
@@ -203,6 +271,24 @@ def default_instruments(tuning: str, bass_tuning: str, extra: list[str] | None =
     return out
 
 
+def apply_genre(spec: ArrangementSpec, genre: str) -> ArrangementSpec:
+    """Раскладывает пресет жанра в спецификацию."""
+    preset = GENRES.get(genre)
+    if not preset:
+        return spec
+    spec.genre = genre
+    spec.groove = preset["groove"]
+    spec.tuning = preset["tuning"]
+    spec.bass_tuning = preset["bass_tuning"]
+    spec.aggression = preset["aggression"]
+    spec.density = preset["density"]
+    spec.instruments = default_instruments(spec.tuning, spec.bass_tuning,
+                                           preset["instruments"])
+    spec.vocals.male_style = preset["male_style"]
+    spec.vocals.female_style = preset["female_style"]
+    return spec
+
+
 def parse_prompt(prompt: str, analysis: TrackAnalysis | None = None,
                  overrides: dict | None = None) -> ArrangementSpec:
     """Главный вход: текст описания -> ArrangementSpec."""
@@ -213,6 +299,13 @@ def parse_prompt(prompt: str, analysis: TrackAnalysis | None = None,
     if analysis is not None:
         spec.tempo = float(analysis.tempo)
         spec.key, spec.mode = analysis.key, analysis.mode
+
+    # 0. Жанр задаёт основу, всё остальное её уточняет
+    for genre, keys in GENRE_KEYWORDS.items():
+        if any(k in text for k in keys):
+            spec = apply_genre(spec, genre)
+            notes.append(f"Жанр: {GENRES[genre]['label']}.")
+            break
 
     # 1. Референсы задают базовый характер
     extra_instruments: list[str] = []
@@ -340,6 +433,8 @@ def _parse_vocals(text: str) -> VocalSpec:
         v.female_style = "scream"
     if "автотюн" in text or "autotune" in text:
         v.autotune = True
+    if "гармони" in text or "бэк-вокал" in text or "бэк вокал" in text:
+        v.harmony = True
     if "без вокала" in text or "инструментал" in text:
         v.male = v.female = False
     return v
@@ -349,6 +444,10 @@ def apply_overrides(spec: ArrangementSpec, overrides: dict) -> ArrangementSpec:
     """Явные значения из UI/API перекрывают то, что вытащено из текста."""
     simple = ("tempo", "key", "mode", "groove", "aggression", "density", "swing",
               "tuning", "bass_tuning", "seed", "title", "tempo_scale", "transpose")
+
+    genre = overrides.get("genre")
+    if genre in GENRES:
+        spec = apply_genre(spec, genre)
     for field_name in simple:
         if overrides.get(field_name) not in (None, ""):
             setattr(spec, field_name, overrides[field_name])

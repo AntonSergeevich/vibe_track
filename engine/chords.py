@@ -29,6 +29,18 @@ CHORD_TEMPLATES: dict[str, tuple[int, ...]] = {
 _QUALITY_BIAS = {"5": 0.92, "": 1.0, "m": 1.0, "sus4": 0.94, "sus2": 0.93,
                  "7": 0.97, "m7": 0.97, "maj7": 0.95, "dim": 0.9}
 
+# Словарь по умолчанию. Расширенный набор (септаккорды, sus) даёт формально
+# более точное совпадение с хромой, но человек, снимающий песню, слышит там
+# простое трезвучие — и на других сайтах будет написано именно оно.
+SIMPLE_QUALITIES = ("", "m")
+FULL_QUALITIES = tuple(CHORD_TEMPLATES)
+
+# Трезвучия ступеней: не только какие тона «свои», но и какое у них
+# наклонение. Без этого мажорная V ступень легко распознаётся как минорная —
+# терцию в плотном миксе почти не слышно, и подсказка тональности решает.
+_MAJOR_TRIADS = {0: "", 2: "m", 4: "m", 5: "", 7: "", 9: "m", 11: "dim"}
+_MINOR_TRIADS = {0: "m", 2: "dim", 3: "", 5: "m", 7: "m", 8: "", 10: ""}
+
 
 @dataclass
 class ChordEvent:
@@ -59,9 +71,10 @@ class ChordEvent:
         return d
 
 
-def _template_matrix() -> tuple[np.ndarray, list[tuple[int, str]]]:
+def _template_matrix(qualities=None) -> tuple[np.ndarray, list[tuple[int, str]]]:
     rows, labels = [], []
-    for quality, intervals in CHORD_TEMPLATES.items():
+    for quality in (qualities or tuple(CHORD_TEMPLATES)):
+        intervals = CHORD_TEMPLATES[quality]
         for root in range(12):
             vec = np.zeros(12, dtype=np.float32)
             for i, iv in enumerate(intervals):
@@ -72,17 +85,31 @@ def _template_matrix() -> tuple[np.ndarray, list[tuple[int, str]]]:
     return np.stack(rows), labels
 
 
-_TEMPLATES, _LABELS = _template_matrix()
+def recognize(analysis: TrackAnalysis, resolution: str = "bar", simple: bool = True,
+              change_penalty: float = 0.12, key_bonus: float = 0.12,
+              min_duration: float | None = None) -> list[ChordEvent]:
+    """Распознаёт аккорды по сетке тактов исходного трека.
 
+    Три вещи, которых не хватало наивному подходу «взять лучший шаблон на
+    такте», из-за чего аккордов получалось вдвое больше, чем слышит человек:
 
-def recognize(analysis: TrackAnalysis, resolution: str = "bar") -> list[ChordEvent]:
-    """Распознаёт аккорды по сетке долей/тактов исходного трека."""
+    * `simple` — словарь из мажора и минора. Септаккорд формально ближе к
+      хроме, но в песеннике будет написано трезвучие;
+    * `key_bonus` — приоритет ступеням найденной тональности, иначе
+      случайный шум уводит в «чужие» аккорды;
+    * `change_penalty` — плата за смену аккорда. Динамическое
+      программирование выбирает не лучший аккорд на такте, а лучшую
+      последовательность целиком, поэтому она перестаёт дёргаться.
+    """
     chroma, times = analysis.chroma, analysis.chroma_times
     if chroma is None or chroma.size == 0:
         return []
 
+    qualities = SIMPLE_QUALITIES if simple else FULL_QUALITIES
+    templates, labels = _template_matrix(qualities)
     grid = _build_grid(analysis, resolution)
-    events: list[ChordEvent] = []
+
+    segments, scores = [], []
     for start, end in grid:
         mask = (times >= start) & (times < end)
         if not np.any(mask):
@@ -91,12 +118,70 @@ def recognize(analysis: TrackAnalysis, resolution: str = "bar") -> list[ChordEve
         norm = np.linalg.norm(vec)
         if norm < 1e-6:
             continue
-        scores = _TEMPLATES @ (vec / norm)
-        best = int(np.argmax(scores))
-        root, quality = _LABELS[best]
-        events.append(ChordEvent(start=float(start), end=float(end), root=root,
-                                 quality=quality, confidence=float(scores[best])))
-    return _merge_repeats(events)
+        segments.append((start, end))
+        scores.append(templates @ (vec / norm))
+    if not segments:
+        return []
+
+    score_matrix = np.stack(scores)
+    score_matrix += key_bonus * _key_prior(labels, analysis.key, analysis.mode)
+    path = _viterbi(score_matrix, change_penalty)
+
+    events = [ChordEvent(start=float(seg[0]), end=float(seg[1]), root=labels[idx][0],
+                         quality=labels[idx][1], confidence=float(score_matrix[i, idx]))
+              for i, (seg, idx) in enumerate(zip(segments, path))]
+    events = _merge_repeats(events)
+    return _drop_short(events, min_duration if min_duration is not None
+                       else analysis.bar_duration * 0.75)
+
+
+def _key_prior(labels: list[tuple[int, str]], key: str, mode: str) -> np.ndarray:
+    """Прибавка аккордам тональности: полная — за совпадение и тона, и наклонения."""
+    if key not in PITCH_NAMES:
+        return np.zeros(len(labels), dtype=np.float32)
+    root_pc = PITCH_NAMES.index(key)
+    triads = _MINOR_TRIADS if mode == "minor" else _MAJOR_TRIADS
+    diatonic = {(root_pc + step) % 12: quality for step, quality in triads.items()}
+
+    prior = np.zeros(len(labels), dtype=np.float32)
+    for i, (root, quality) in enumerate(labels):
+        expected = diatonic.get(root)
+        if expected is None:
+            continue
+        prior[i] = 1.0 if quality == expected else 0.35   # «свой» тон, чужое наклонение
+    return prior
+
+
+def _viterbi(scores: np.ndarray, change_penalty: float) -> list[int]:
+    """Лучшая последовательность аккордов, а не лучший аккорд на каждом такте."""
+    n_frames, n_states = scores.shape
+    best = scores[0].copy()
+    backtrack = np.zeros((n_frames, n_states), dtype=np.int16)
+    for t in range(1, n_frames):
+        stay = best                                   # остаться на том же аккорде
+        switch = best.max() - change_penalty          # перейти на любой другой
+        prev_best = int(np.argmax(best))
+        choose_stay = stay > switch
+        backtrack[t] = np.where(choose_stay, np.arange(n_states), prev_best)
+        best = scores[t] + np.where(choose_stay, stay, switch)
+
+    path = [int(np.argmax(best))]
+    for t in range(n_frames - 1, 0, -1):
+        path.append(int(backtrack[t][path[-1]]))
+    return path[::-1]
+
+
+def _drop_short(events: list[ChordEvent], min_duration: float) -> list[ChordEvent]:
+    """Слишком короткие аккорды прилипают к соседям — так их слышит человек."""
+    if min_duration <= 0 or len(events) < 2:
+        return events
+    out: list[ChordEvent] = []
+    for ev in events:
+        if ev.duration < min_duration and out:
+            out[-1].end = ev.end
+        else:
+            out.append(ev)
+    return _merge_repeats(out)
 
 
 def _build_grid(analysis: TrackAnalysis, resolution: str) -> list[tuple[float, float]]:

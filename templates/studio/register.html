@@ -1,27 +1,40 @@
 {% load static %}<!DOCTYPE html>
 <html lang="ru">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0f">
 <title>Регистрация — VibeTrack</title>
+<link rel="icon" href="{% static 'studio/favicon.svg' %}" type="image/svg+xml">
 <link rel="stylesheet" href="{% static 'studio/studio.css' %}">
 </head>
 <body>
-<header class="top"><h1>VIBE<span>TRACK</span></h1><p class="tagline">Создать аккаунт</p></header>
-<main>
+<header class="site-header">
+  <a class="logo" href="{% url 'studio' %}">
+    {% include 'studio/_logo.html' %}
+    <span class="logo-text">VIBE<span>TRACK</span></span>
+  </a>
+</header>
+
+<div class="auth">
   <section class="card">
-    <form method="post">
+    <h2>Создать аккаунт</h2>
+    <p class="sub">Треки, аккорды и табы сохранятся в личном кабинете</p>
+    <form method="post" novalidate>
       {% csrf_token %}
+      {% if form.non_field_errors %}<ul class="errorlist">{{ form.non_field_errors }}</ul>{% endif %}
       {% for field in form %}
-        <label>{{ field.label }}
+        <div>
+          <label for="{{ field.id_for_label }}">{{ field.label }}</label>
           {{ field }}
-        </label>
-        {% if field.errors %}<p class="warnings">{{ field.errors|striptags }}</p>{% endif %}
-        {% if field.help_text %}<p class="hint">{{ field.help_text|safe }}</p>{% endif %}
+          {% if field.errors %}<ul class="errorlist">{% for e in field.errors %}<li>{{ e }}</li>{% endfor %}</ul>{% endif %}
+          {% if field.help_text %}<div class="helptext">{{ field.help_text|safe }}</div>{% endif %}
+        </div>
       {% endfor %}
       <button class="primary" type="submit">Зарегистрироваться</button>
     </form>
     <p class="hint">Уже есть аккаунт? <a href="{% url 'login' %}">Войти</a></p>
   </section>
-</main>
+</div>
 </body>
 </html>

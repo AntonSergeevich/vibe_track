@@ -1,13 +1,20 @@
-/* VibeTrack studio — загрузка трека, запуск рендера, партитура, запись голоса. */
+/* VibeTrack studio: загрузка с прогрессом, выбор стиля, рендер, запись голоса. */
 (() => {
   const $ = (sel) => document.querySelector(sel);
   const api = (path) => `/api/${path}`;
-  let state = { track: null, job: null, poll: null, score: null };
+  const state = { track: null, job: null, poll: null, genre: 'nu_metal' };
 
-  async function request(path, { method = 'GET', body = null, form = null } = {}) {
+  const STAGE_NAMES = {
+    load: 'Читаю файл', analyze: 'Определяю темп и тональность',
+    separate: 'Разделяю на дорожки', transcribe: 'Распознаю текст',
+    arrange: 'Собираю аранжировку', render: 'Играю инструменты',
+    vocals: 'Обрабатываю вокал', mix: 'Свожу микс', score: 'Пишу табы',
+    export: 'Сохраняю файлы', done: 'Готово', queued: 'В очереди',
+  };
+
+  async function request(path, { method = 'GET', body = null } = {}) {
     const opts = { method, headers: { 'X-CSRFToken': window.CSRF_TOKEN } };
-    if (form) opts.body = form;
-    else if (body) {
+    if (body) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
     }
@@ -15,75 +22,109 @@
     const text = await res.text();
     let data = {};
     try { data = text ? JSON.parse(text) : {}; } catch { data = { detail: text }; }
-    if (!res.ok) throw new Error(data.detail || `Ошибка ${res.status}`);
+    if (!res.ok) throw Object.assign(new Error(data.detail || `Ошибка ${res.status}`), { data, status: res.status });
     return data;
   }
 
-  /* ---------------------------------------------------------- возможности */
+  /* --------------------------------------------------------- возможности */
   request('capabilities/').then((caps) => {
     const b = caps.backends || {};
-    const badge = (info, onText, offText) => {
-      if (!info) return offText;
-      const state = info.loaded ? ' (загружена)' : '';
-      return info.available ? `${onText}: ${info.model}${state}` : offText;
-    };
+    const state_of = (info, on, off) => (info && info.available ? `${on}: ${info.model}` : off);
     $('#backends').innerHTML = [
-      `Разделение дорожек: <b>${badge(b.demucs, 'Demucs', 'DSP (базовое)')}</b>`,
-      `Текст песни: <b>${badge(b.whisper, 'Whisper', 'вручную')}</b>`,
-      `Разбор описания: <b>${badge(b.llm, 'Claude', 'по ключевым словам')}</b>`,
+      `Дорожки: <b>${state_of(b.demucs, 'Demucs', 'DSP (базовое)')}</b>`,
+      `Текст: <b>${state_of(b.whisper, 'Whisper', 'вручную')}</b>`,
     ].join(' · ');
-    $('#refs').innerHTML = (caps.references || [])
-      .map((r) => `<button type="button" class="chip">${r}</button>`).join('');
-    $('#refs').addEventListener('click', (e) => {
-      if (!e.target.classList.contains('chip')) return;
-      const t = $('#prompt');
-      t.value = t.value ? `${t.value.replace(/\s+$/, '')}, в духе ${e.target.textContent}`
-                        : `ню-метал в духе ${e.target.textContent}`;
-    });
   }).catch(() => {});
 
-  /* ------------------------------------------------------------- загрузка */
+  /* ------------------------------------------------ загрузка с прогрессом */
   const dropzone = $('#dropzone');
-  $('#pick').addEventListener('click', () => $('#file').click());
-  dropzone.addEventListener('click', (e) => { if (e.target === dropzone) $('#file').click(); });
+  $('#pick').addEventListener('click', (e) => { e.stopPropagation(); $('#file').click(); });
+  dropzone.addEventListener('click', () => $('#file').click());
   ['dragenter', 'dragover'].forEach((ev) => dropzone.addEventListener(ev, (e) => {
     e.preventDefault(); dropzone.classList.add('over');
   }));
   ['dragleave', 'drop'].forEach((ev) => dropzone.addEventListener(ev, (e) => {
     e.preventDefault(); dropzone.classList.remove('over');
   }));
-  dropzone.addEventListener('drop', (e) => {
-    const file = e.dataTransfer.files[0];
-    if (file) upload(file);
-  });
+  dropzone.addEventListener('drop', (e) => e.dataTransfer.files[0] && upload(e.dataTransfer.files[0]));
   $('#file').addEventListener('change', (e) => e.target.files[0] && upload(e.target.files[0]));
+  $('#change-track').addEventListener('click', () => {
+    $('#track-chip').classList.add('hidden');
+    dropzone.classList.remove('hidden');
+    $('#file').value = '';
+  });
 
-  async function upload(file) {
-    const info = $('#track-info');
-    info.classList.remove('hidden');
-    info.textContent = `Загружаю «${file.name}» (${(file.size / 1048576).toFixed(1)} МБ)…`;
+  function upload(file) {
+    const box = $('#upload-progress');
+    const bar = box.querySelector('.bar span');
+    box.classList.remove('hidden');
+    dropzone.classList.add('hidden');
+    $('#upload-name').textContent = file.name;
+    bar.style.width = '0%';
+    $('#upload-pct').textContent = '0%';
+
     const form = new FormData();
     form.append('file', file);
     form.append('title', file.name.replace(/\.[^.]+$/, ''));
-    try {
-      state.track = await request('tracks/upload/', { method: 'POST', form });
-      info.innerHTML = `Загружено: <b>${state.track.title}</b> (трек #${state.track.id})`;
-      $('#run').disabled = false;
-    } catch (err) {
-      info.textContent = `Не получилось: ${err.message}`;
-    }
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', api('tracks/upload/'));
+    xhr.setRequestHeader('X-CSRFToken', window.CSRF_TOKEN);
+    // прогресс отдаёт только XHR: fetch о ходе отправки ничего не сообщает
+    xhr.upload.onprogress = (e) => {
+      if (!e.lengthComputable) return;
+      const pct = Math.round((e.loaded / e.total) * 100);
+      bar.style.width = `${pct}%`;
+      $('#upload-pct').textContent = `${pct}%`;
+    };
+    xhr.upload.onload = () => { $('#upload-pct').textContent = 'обрабатываю…'; };
+    xhr.onload = () => {
+      box.classList.add('hidden');
+      let data = {};
+      try { data = JSON.parse(xhr.responseText); } catch { data = {}; }
+      if (xhr.status !== 201) {
+        dropzone.classList.remove('hidden');
+        alert(data.detail || `Не удалось загрузить (${xhr.status})`);
+        return;
+      }
+      state.track = data;
+      $('#track-name').textContent = data.title;
+      $('#track-meta').textContent = `${(file.size / 1048576).toFixed(1)} МБ · трек #${data.id}`;
+      $('#track-chip').classList.remove('hidden');
+      $('#step-style').classList.remove('hidden');
+      $('#step-style').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    };
+    xhr.onerror = () => {
+      box.classList.add('hidden'); dropzone.classList.remove('hidden');
+      alert('Сеть оборвалась при загрузке');
+    };
+    xhr.send(form);
   }
 
-  /* --------------------------------------------------------------- рендер */
+  /* ------------------------------------------------------------- стили */
+  $('#genres').addEventListener('click', (e) => {
+    const card = e.target.closest('.genre');
+    if (!card) return;
+    document.querySelectorAll('.genre').forEach((g) => g.classList.toggle('active', g === card));
+    state.genre = card.dataset.genre;
+  });
+
   $('#aggression').addEventListener('input', (e) => { $('#aggr-out').value = e.target.value; });
   $('#transpose').addEventListener('input', (e) => {
     const v = parseInt(e.target.value, 10);
     $('#transpose-out').value = v === 0 ? 'как в оригинале'
       : `${v > 0 ? '+' : ''}${v} полутон${Math.abs(v) === 1 ? '' : 'а'}`;
   });
+  $('#take-autotune').addEventListener('input', (e) => {
+    $('#take-at-out').value = e.target.value < 0 ? 'выключен' : e.target.value;
+  });
 
   function collectOverrides() {
+    const touched = $('#step-style').querySelector('details').open;
+    const overrides = { genre: state.genre };
+    if (!touched) return overrides;      // не трогал настройки — пусть решает жанр
     return {
+      ...overrides,
       tuning: $('#tuning').value,
       bass_tuning: $('#bass_tuning').value,
       groove: $('#groove').value,
@@ -96,15 +137,17 @@
         male_style: $('#v-male-style').value,
         female_style: $('#v-female-style').value,
         autotune: $('#v-autotune').checked,
+        harmony: $('#v-harmony').checked,
       },
     };
   }
 
+  /* ------------------------------------------------------------ рендер */
   $('#run').addEventListener('click', async () => {
     if (!state.track) return;
     $('#run').disabled = true;
     $('#progress').classList.remove('hidden');
-    setProgress(1, 'ставлю в очередь');
+    setProgress(1, 'queued');
     try {
       state.job = await request(`tracks/${state.track.id}/transform/`, {
         method: 'POST',
@@ -116,14 +159,20 @@
       });
       pollJob();
     } catch (err) {
-      setProgress(0, `ошибка: ${err.message}`);
       $('#run').disabled = false;
+      if (err.status === 402) {
+        $('#stage-name').textContent = err.data.detail;
+        $('#stage-pct').textContent = '';
+      } else {
+        setProgress(0, 'error', err.message);
+      }
     }
   });
 
-  function setProgress(pct, stage) {
+  function setProgress(pct, stage, text) {
     $('#progress .bar span').style.width = `${pct}%`;
-    $('#progress .stage').textContent = `${stage} — ${pct}%`;
+    $('#stage-name').textContent = text || STAGE_NAMES[stage] || stage;
+    $('#stage-pct').textContent = `${pct}%`;
   }
 
   function pollJob() {
@@ -135,11 +184,11 @@
         if (st.status === 'done') { clearInterval(state.poll); showResult(); }
         if (st.status === 'error') {
           clearInterval(state.poll);
-          setProgress(0, `ошибка: ${st.error?.split('\n')[0] || 'неизвестно'}`);
+          setProgress(0, 'error', `Ошибка: ${(st.error || '').split('\n')[0]}`);
           $('#run').disabled = false;
         }
-      } catch (err) { /* сеть моргнула — попробуем на следующем тике */ }
-    }, 1500);
+      } catch { /* сеть моргнула — попробуем на следующем тике */ }
+    }, 1200);
   }
 
   async function showResult() {
@@ -155,27 +204,26 @@
     const a = job.result?.analysis || {};
     const spec = job.spec || {};
     $('#analysis').innerHTML = [
-      `Темп: <b>${Math.round(a.tempo || 0)} BPM</b>`,
-      `Тональность: <b>${a.key_name || '—'}</b>`,
-      `Строй: <b>${spec.tuning || '—'}</b>`,
-      `Грув: <b>${spec.groove || '—'}</b>`,
-      `Длительность: <b>${Math.round(a.duration || 0)} с</b>`,
-    ].join('');
+      `Темп <b>${Math.round(a.tempo || 0)}</b>`,
+      `Тональность <b>${a.key_name || '—'}</b>`,
+      `Строй <b>${spec.tuning || '—'}</b>`,
+      `Грув <b>${spec.groove || '—'}</b>`,
+      `Длина <b>${Math.round(a.duration || 0)} с</b>`,
+    ].map((t) => `<span>${t}</span>`).join('');
 
     $('#stems').innerHTML = (job.stems || []).map((s) => `
       <div class="stem">
         <div><div class="name">${s.label || s.name}</div>
              <div class="lvl">${s.rms_db ?? '—'} dB RMS</div></div>
         <audio controls preload="none" src="${s.file_url}"></audio>
-        <a class="btn" href="${s.file_url}" download>↓</a>
+        <div class="stem-actions"><a class="btn small" href="${s.file_url}" download>↓</a></div>
       </div>`).join('');
 
     renderScore(job.score || {});
-    $('#step-result').scrollIntoView({ behavior: 'smooth' });
+    $('#step-result').scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
   function renderScore(score) {
-    state.score = score;
     const views = {};
     if (score.lyric_sheet) views['Текст с аккордами'] = score.lyric_sheet;
     if (score.chord_chart) views['Аккорды'] = score.chord_chart;
@@ -183,7 +231,7 @@
     const names = Object.keys(views);
     if (!names.length) {
       $('#score-nav').innerHTML = '';
-      $('#score-view').textContent = 'Партитура пуста: добавь текст песни или включи инструменты.';
+      $('#score-view').textContent = 'Партитура пуста: включи инструменты или добавь текст песни.';
       return;
     }
     $('#score-nav').innerHTML = names
@@ -197,11 +245,8 @@
     };
   }
 
-  /* -------------------------------------------------------- запись голоса */
+  /* ----------------------------------------------------- запись голоса */
   let recorder = null; let chunks = []; let timer = null; let started = 0;
-  $('#take-autotune').addEventListener('input', (e) => {
-    $('#take-at-out').value = e.target.value < 0 ? 'авто' : e.target.value;
-  });
 
   $('#rec').addEventListener('click', async () => {
     try {
@@ -248,12 +293,13 @@
     if ($('#take-target').value) form.append('target_gender', $('#take-target').value);
     const at = parseFloat($('#take-autotune').value);
     if (at >= 0) form.append('autotune', at);
-    try {
-      const take = await request('vocal-takes/', { method: 'POST', form });
-      pollTake(take.id);
-    } catch (err) {
-      out.innerHTML = `<p class="warnings">Не вышло: ${err.message}</p>`;
-    }
+
+    const res = await fetch(api('vocal-takes/'), {
+      method: 'POST', headers: { 'X-CSRFToken': window.CSRF_TOKEN }, body: form,
+    });
+    const data = await res.json();
+    if (!res.ok) { out.innerHTML = `<p class="warnings">Не вышло: ${data.detail || res.status}</p>`; return; }
+    pollTake(data.id);
   }
 
   function pollTake(id) {
@@ -265,14 +311,14 @@
           clearInterval(iv);
           out.innerHTML = `
             <p class="note">${(take.notes || []).join(' · ') || 'Дубль обработан.'}</p>
-            <label>Обработанный голос<audio controls src="${take.processed_url}"></audio></label>
-            <label>Микс с минусовкой<audio controls src="${take.mixed_url}"></audio></label>
-            <a class="btn" href="${take.mixed_url}" download>Скачать микс</a>`;
+            <label>Голос<audio controls src="${take.processed_url}"></audio></label>
+            <label>Микс<audio controls src="${take.mixed_url}"></audio></label>
+            <a class="btn small" href="${take.mixed_url}" download>Скачать микс</a>`;
         } else if (take.status === 'error') {
           clearInterval(iv);
           out.innerHTML = `<p class="warnings">Ошибка: ${take.error}</p>`;
         }
-      } catch (err) { /* повторим на следующем тике */ }
-    }, 1500);
+      } catch { /* повторим на следующем тике */ }
+    }, 1200);
   }
 })();

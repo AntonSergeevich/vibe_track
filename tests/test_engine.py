@@ -273,3 +273,55 @@ class TestTranspose(EngineTestCase):
         high_note = high.part("guitar_rhythm").notes[0]
         self.assertNotEqual(low_note.fret, high_note.fret,
                             "сдвиг тональности должен менять лад, а не только звук")
+
+
+class TestChordSmoothing(EngineTestCase):
+    """Аккордов должно быть столько, сколько слышит человек, а не сколько видит спектр."""
+
+    def test_viterbi_holds_chord_through_flicker(self):
+        """Один дрогнувший такт не должен рождать лишний аккорд."""
+        from engine.chords import _viterbi
+
+        # четыре такта: на третьем шум чуть перевесил в сторону второго аккорда
+        scores = np.array([[0.90, 0.60],
+                           [0.88, 0.62],
+                           [0.70, 0.74],
+                           [0.89, 0.61]], dtype=np.float32)
+
+        self.assertEqual(_viterbi(scores, change_penalty=0.0), [0, 0, 1, 0],
+                         "без штрафа каждый такт выбирается сам по себе")
+        self.assertEqual(_viterbi(scores, change_penalty=0.12), [0, 0, 0, 0],
+                         "со штрафом последовательность остаётся целой")
+
+    def test_viterbi_keeps_real_chord_change(self):
+        """Настоящая смена аккорда штрафом не затирается."""
+        from engine.chords import _viterbi
+
+        scores = np.array([[0.92, 0.40],
+                           [0.90, 0.42],
+                           [0.38, 0.95],
+                           [0.40, 0.93]], dtype=np.float32)
+        self.assertEqual(_viterbi(scores, change_penalty=0.12), [0, 0, 1, 1])
+
+    def test_simple_vocabulary_has_no_extensions(self):
+        from engine.chords import recognize
+
+        for chord in recognize(self.analysis):
+            self.assertIn(chord.quality, ("", "m"),
+                          f"{chord.name}: в песеннике пишут трезвучия")
+
+    def test_key_prior_prefers_diatonic_quality(self):
+        from engine.chords import _key_prior
+
+        labels = [(7, ""), (7, "m"), (6, "")]      # G, Gm, F# в тональности до мажор
+        prior = _key_prior(labels, "C", "major")
+        self.assertGreater(prior[0], prior[1], "V ступень мажорная, а не минорная")
+        self.assertEqual(prior[2], 0.0, "чужой тон подсказки не получает")
+
+    def test_short_chords_are_absorbed(self):
+        from engine.chords import ChordEvent, _drop_short
+
+        events = [ChordEvent(0.0, 2.0, 9, "m"), ChordEvent(2.0, 2.1, 5, ""),
+                  ChordEvent(2.1, 4.0, 0, "")]
+        merged = _drop_short(events, min_duration=1.0)
+        self.assertEqual([e.name for e in merged], ["Am", "C"])

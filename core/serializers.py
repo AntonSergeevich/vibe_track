@@ -2,7 +2,7 @@
 from django.contrib.auth import get_user_model
 from rest_framework import serializers
 
-from engine.arrangement import (BASS_TUNINGS, GROOVE_KEYWORDS, INSTRUMENT_CATALOG,
+from engine.arrangement import (BASS_TUNINGS, GENRES, GROOVE_KEYWORDS, INSTRUMENT_CATALOG,
                                 TUNINGS, VOCAL_STYLE_KEYWORDS)
 
 from .models import (AudioFile, Billing, EffectChain, Project, RenderJob, Score, Stem,
@@ -80,6 +80,9 @@ class RenderJobCreateSerializer(serializers.Serializer):
     options = serializers.DictField(required=False, default=dict)
 
     def validate_overrides(self, value):
+        genre = value.get('genre')
+        if genre and genre not in GENRES:
+            raise serializers.ValidationError(f"Неизвестный стиль: {genre}")
         instruments = value.get('instruments')
         if instruments is not None:
             unknown = set(instruments) - set(INSTRUMENT_CATALOG)

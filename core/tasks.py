@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import traceback
 
 from celery import shared_task
 from django.conf import settings
+from django.db import connections
 
 from engine.render import RenderOptions, add_vocal_take, transform
 
@@ -19,6 +21,29 @@ from . import billing
 from .models import AudioFile, RenderJob, Score, Stem, VocalTake
 
 logger = logging.getLogger(__name__)
+
+def enqueue(task, *args):
+    """Ставит задачу в очередь — или запускает в фоновом потоке.
+
+    В eager-режиме Celery выполняет задачу прямо внутри HTTP-запроса: ответ
+    не возвращается, пока рендер не закончится, поэтому браузеру нечего
+    опрашивать и полоса прогресса стоит на месте. Поток решает это без
+    Redis — ровно для локальной разработки.
+    """
+    if getattr(settings, "VIBETRACK_INLINE_WORKER", False):
+        threading.Thread(target=_run_inline, args=(task, *args), daemon=True).start()
+        return None
+    return task.delay(*args)
+
+
+def _run_inline(task, *args) -> None:
+    try:
+        task(*args)
+    except Exception:  # noqa: BLE001 — поток не должен уронить процесс
+        logger.exception("Фоновая задача %s упала", getattr(task, "name", task))
+    finally:
+        connections.close_all()      # иначе соединение потока останется висеть
+
 
 STEM_LABELS = {
     "guitar_rhythm": "Ритм-гитара (лево)",

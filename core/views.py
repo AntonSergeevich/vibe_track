@@ -15,7 +15,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
-from engine.arrangement import (BASS_TUNINGS, GROOVE_KEYWORDS, INSTRUMENT_CATALOG,
+from engine.arrangement import (BASS_TUNINGS, GENRES, GROOVE_KEYWORDS, INSTRUMENT_CATALOG,
                                 REFERENCE_ARTISTS, TUNINGS, VOCAL_STYLE_KEYWORDS,
                                 parse_prompt)
 from engine.models import status as model_status
@@ -29,7 +29,7 @@ from .serializers import (AudioFileSerializer, BillingSerializer, EffectChainSer
                           ProjectSerializer, RenderJobCreateSerializer, RenderJobSerializer,
                           ScoreSerializer, TrackSerializer, TrackUploadSerializer,
                           UserSerializer, VocalTakeSerializer)
-from .tasks import process_vocal_take, render_track
+from .tasks import enqueue, process_vocal_take, render_track
 
 ALLOWED_AUDIO_EXT = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.webm', '.opus', '.aiff'}
 
@@ -37,6 +37,7 @@ ALLOWED_AUDIO_EXT = {'.wav', '.mp3', '.flac', '.ogg', '.m4a', '.aac', '.webm', '
 def studio(request):
     """Одностраничная студия."""
     return render(request, 'studio/index.html', {
+        'genres': GENRES,
         'instruments': INSTRUMENT_CATALOG,
         'tunings': {k: TUNING_LABELS.get(k, k) for k in TUNINGS},
         'bass_tunings': {k: TUNING_LABELS.get(k, k) for k in BASS_TUNINGS},
@@ -194,8 +195,9 @@ class TrackViewSet(viewsets.ModelViewSet):
         job = RenderJob.objects.create(track=track, prompt=data['prompt'],
                                        overrides=data['overrides'], options=data['options'])
         billing_service.charge(request.user, job, note=data['prompt'][:200])
-        async_result = render_track.delay(job.pk)
-        RenderJob.objects.filter(pk=job.pk).update(celery_task_id=getattr(async_result, 'id', '') or '')
+        async_result = enqueue(render_track, job.pk)
+        RenderJob.objects.filter(pk=job.pk).update(
+            celery_task_id=getattr(async_result, 'id', '') or '')
         job.refresh_from_db()
         return Response(RenderJobSerializer(job, context={'request': request}).data,
                         status=status.HTTP_202_ACCEPTED)
@@ -267,7 +269,7 @@ class VocalTakeViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         take = serializer.save(status=RenderJob.STATUS_QUEUED)
-        process_vocal_take.delay(take.pk)
+        enqueue(process_vocal_take, take.pk)
 
     @action(detail=True, methods=['post'])
     def reprocess(self, request, pk=None):
@@ -278,7 +280,7 @@ class VocalTakeViewSet(viewsets.ModelViewSet):
                 setattr(take, field, request.data[field])
         take.status = RenderJob.STATUS_QUEUED
         take.save()
-        process_vocal_take.delay(take.pk)
+        enqueue(process_vocal_take, take.pk)
         return Response(VocalTakeSerializer(take, context={'request': request}).data,
                         status=status.HTTP_202_ACCEPTED)
 
@@ -332,6 +334,7 @@ class UserViewSet(viewsets.ReadOnlyModelViewSet):
 def capabilities(request):
     """Справочник для UI: инструменты, строи, стили и доступные бэкенды."""
     return Response({
+        'genres': {k: {'id': k, **v} for k, v in GENRES.items()},
         'instruments': {k: {**v, 'id': k} for k, v in INSTRUMENT_CATALOG.items()},
         'tunings': {k: TUNING_LABELS.get(k, k) for k in TUNINGS},
         'bass_tunings': {k: TUNING_LABELS.get(k, k) for k in BASS_TUNINGS},
