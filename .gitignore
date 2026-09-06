@@ -6,6 +6,9 @@ env/
 .env
 *.sqlite3
 media/
+# аудиосэмплы: своя лицензия, не место в репозитории
+samples/*
+!samples/README.md
 staticfiles/
 renders/
 .idea/

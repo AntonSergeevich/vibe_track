@@ -462,6 +462,28 @@ class UnlimitedAccessTests(TestCase):
         call_command("grant_plan", "dev", "studio", "--days", "10")
         self.assertEqual(billing.plan_for(self.user).slug, "studio")
 
+    def test_grant_plan_without_username_lists_users(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        out = StringIO()
+        call_command("grant_plan", stdout=out)
+        printed = out.getvalue()
+        self.assertIn("dev", printed)
+        self.assertIn("Проба", printed, "рядом с логином видно текущий тариф")
+
+    def test_grant_plan_unknown_user_shows_list(self):
+        from io import StringIO
+
+        from django.core.management import call_command
+        from django.core.management.base import CommandError
+
+        out = StringIO()
+        with self.assertRaises(CommandError):
+            call_command("grant_plan", "нет_такого", stdout=out)
+        self.assertIn("dev", out.getvalue(), "в ошибке должен быть список существующих логинов")
+
     def test_grant_plan_unlimited_flag(self):
         from django.core.management import call_command
 

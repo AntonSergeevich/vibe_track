@@ -5,13 +5,19 @@
 разложить его обратно на инструменты нельзя, а значит нельзя и построить
 табулатуру.
 
-Запуск (на машине с видеокартой):
+ВАЖНО про окружение. audiocraft тянет spacy старой версии, который не
+собирается на Python 3.12 и 3.13 — нужен отдельный интерпретатор 3.10 или
+3.11. И нужна видеокарта NVIDIA: без неё 30 секунд считаются десятки минут.
+То есть запускать это на обычном рабочем ноутбуке смысла нет — только на
+арендованной машине с GPU.
 
+Подготовка на арендованном сервере (Linux, Python 3.11):
+
+    python3.11 -m venv ~/mg && source ~/mg/bin/activate
     pip install --index-url https://download.pytorch.org/whl/cu121 torch torchaudio
     pip install audiocraft
-    python scripts/try_musicgen.py we_angel.mp3 --style "aggressive nu metal, downtuned 7-string guitars, heavy drums" --seconds 30
-
-Без видеокарты запускать бессмысленно: 30 секунд считаются десятки минут.
+    python scripts/try_musicgen.py we_angel.mp3 \
+        --style "aggressive nu metal, downtuned 7-string guitars, heavy drums" --seconds 30
 """
 from __future__ import annotations
 
@@ -32,12 +38,19 @@ def main() -> int:
     parser.add_argument("--out", default="musicgen_preview.wav")
     args = parser.parse_args()
 
+    if sys.version_info >= (3, 12):
+        print(f"Python {sys.version_info.major}.{sys.version_info.minor}: audiocraft на нём не "
+              "собирается — его зависимость spacy требует Python 3.10 или 3.11.\n"
+              "Сделайте отдельное окружение на 3.11, см. шапку файла.")
+        return 1
+
     try:
         import torch
         import torchaudio
         from audiocraft.models import MusicGen
     except ImportError as exc:
-        print(f"Не хватает пакета: {exc}\nПоставьте torch и audiocraft — см. шапку файла.")
+        print(f"Не хватает пакета: {exc}\nПоставьте torch, torchaudio и audiocraft — "
+              "см. шапку файла.")
         return 1
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
