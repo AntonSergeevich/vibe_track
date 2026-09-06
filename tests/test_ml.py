@@ -627,6 +627,23 @@ class TestStabilityProvider(unittest.TestCase):
                          "длительность ограничена лимитом провайдера")
         self.assertIn("strength", call["data"])
 
+    def test_steps_stay_inside_the_accepted_range(self):
+        """stable-audio-2 принимает steps только 30-100.
+
+        Значение вне диапазона провайдер отвергает целиком — вызов не
+        доходит до генерации, а выглядит как «сервис не работает».
+        """
+        from engine.generation import CoverRequest, generate_cover
+
+        session = _FakeStabilitySession(self.audio_bytes)
+        with mock.patch.dict(os.environ, self._env()):
+            os.environ.pop("VIBETRACK_STABILITY_STEPS", None)
+            generate_cover(CoverRequest(self.source_path, "nu metal"), session=session)
+
+        steps = int(session.calls[0]["data"]["steps"])
+        self.assertGreaterEqual(steps, 30)
+        self.assertLessEqual(steps, 100)
+
     def test_input_is_trimmed_and_normalised(self):
         from engine.audio_io import load
         from engine.dsp import rms_db

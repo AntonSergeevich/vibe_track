@@ -141,7 +141,8 @@ def stability_generate(request: CoverRequest, session=None) -> Audio:
                     "strength": os.getenv("VIBETRACK_STABILITY_STRENGTH", "0.75"),
                     "duration": duration,
                     "output_format": os.getenv("VIBETRACK_STABILITY_FORMAT", "mp3"),
-                    "steps": os.getenv("VIBETRACK_STABILITY_STEPS", "8"),
+                    # stable-audio-2 принимает только 30-100: меньше — отказ 400
+                    "steps": os.getenv("VIBETRACK_STABILITY_STEPS", "50"),
                 },
                 timeout=int(os.getenv("VIBETRACK_STABILITY_TIMEOUT", "600")),
             )
