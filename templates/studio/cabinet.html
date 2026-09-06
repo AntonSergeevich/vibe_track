@@ -31,13 +31,14 @@
       <span>Сейчас: <b>{{ billing.plan.name }}</b></span>
       <span>Треков в месяц: <b>{{ billing.plan.tracks }}</b></span>
       <span>Использовано: <b>{{ billing.used }}</b></span>
-      <span>Осталось: <b>{{ billing.remaining }}</b></span>
+      {% if billing.unlimited %}<span>Лимит: <b>без ограничений</b></span>
+      {% else %}<span>Осталось: <b>{{ billing.remaining }}</b></span>{% endif %}
       {% if subscription %}<span>Действует до: <b>{{ subscription.expires_at|date:"d.m.Y" }}</b></span>{% endif %}
     </div>
 
     <h3>Сменить тариф</h3>
     <div class="stems">
-      {% for plan in plans %}{% if plan.slug != 'free' %}
+      {% for plan in plans %}
       <div class="stem">
         <div>
           <div class="name">{{ plan.name }} — {{ plan.price_rub }} ₽{% if plan.recurring %}/мес{% endif %}</div>
@@ -46,7 +47,7 @@
         <div></div>
         <button class="btn buy" data-plan="{{ plan.slug }}">Выбрать</button>
       </div>
-      {% endif %}{% endfor %}
+      {% endfor %}
     </div>
     <p id="checkout-result" class="hint"></p>
   </section>
@@ -58,12 +59,15 @@
       {% for job in jobs %}
       <div class="stem">
         <div>
-          <div class="name">{{ job.track.title }}</div>
-          <div class="lvl">{{ job.created_at|date:"d.m.Y H:i" }} · {{ job.get_status_display }}{% if job.prompt %} · {{ job.prompt|truncatechars:60 }}{% endif %}</div>
+          <div class="name"><a href="{% url 'render-page' job.pk %}">{{ job.track.title }}</a></div>
+          <div class="lvl">{{ job.created_at|date:"d.m.Y H:i" }} · {{ job.get_status_display }} ·
+            {{ job.stems.count }} дорожек{% if job.prompt %} · {{ job.prompt|truncatechars:50 }}{% endif %}</div>
         </div>
-        {% if job.master %}<audio controls preload="none" src="{{ job.master.url }}"></audio>
-        <a class="btn" href="{{ job.master.url }}" download>↓</a>
-        {% else %}<div class="lvl">{{ job.error|truncatechars:80|default:"—" }}</div><div></div>{% endif %}
+        {% if job.master %}<audio controls preload="none" src="{{ job.master.url }}"></audio>{% else %}
+        <div class="lvl">{{ job.error|truncatechars:80|default:"—" }}</div>{% endif %}
+        <div class="stem-actions">
+          <a class="btn small" href="{% url 'render-page' job.pk %}">Открыть</a>
+        </div>
       </div>
       {% endfor %}
     </div>

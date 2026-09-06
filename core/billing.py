@@ -41,6 +41,11 @@ PLANS: dict[str, PlanSpec] = {
     "pro": PlanSpec("pro", "Продакшн", 1690, 200, wav_stems=True, priority=True,
                     storage_days=3650, commercial=True),
 }
+# Тариф для владельца сервиса и тестировщиков: не продаётся, выдаётся правами
+PLANS["unlimited"] = PlanSpec("unlimited", "Безлимит (разработчик)", 0, 1_000_000,
+                              recurring=False, wav_stems=True, demucs=True,
+                              priority=True, storage_days=3650, commercial=True)
+
 DEFAULT_PLAN = "free"
 
 
@@ -60,12 +65,33 @@ class QuotaExceeded(Exception):
         super().__init__(message)
 
 
+def is_unlimited(user) -> bool:
+    """Владелец сервиса и тестировщики работают без лимитов.
+
+    Проверяется по правам (staff/superuser) и по списку имён в
+    VIBETRACK_UNLIMITED_USERS — чтобы не выдавать себе доступ в админку
+    только ради того, чтобы обработать трек.
+    """
+    import os
+
+    if not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "is_staff", False) or getattr(user, "is_superuser", False):
+        return True
+    allowed = {name.strip().lower()
+               for name in os.getenv("VIBETRACK_UNLIMITED_USERS", "").split(",")
+               if name.strip()}
+    return str(getattr(user, "username", "")).lower() in allowed
+
+
 def plan_for(user) -> PlanSpec:
     """Действующий тариф пользователя."""
     from .models import Subscription
 
     if not getattr(user, "is_authenticated", False):
         return PLANS[DEFAULT_PLAN]
+    if is_unlimited(user):
+        return PLANS["unlimited"]
     sub = (Subscription.objects
            .filter(user=user, expires_at__gt=timezone.now())
            .order_by("-expires_at")
@@ -133,6 +159,8 @@ def remaining(user) -> int:
 def check_quota(user) -> PlanSpec:
     """Бросает QuotaExceeded, если лимит исчерпан. Иначе возвращает тариф."""
     plan = plan_for(user)
+    if plan.slug == "unlimited":
+        return plan
     used = used_this_period(user)
     if used >= plan.tracks:
         raise QuotaExceeded(plan, used, period_end(user))
@@ -186,8 +214,9 @@ def summary(user) -> dict:
         "remaining": max(plan.tracks - used, 0),
         "period_start": period_start(user) if getattr(user, "is_authenticated", False) else None,
         "period_end": period_end(user) if getattr(user, "is_authenticated", False) else None,
+        "unlimited": plan.slug == "unlimited",
         "plans": [{"slug": p.slug, "name": p.name, "price_rub": p.price_rub,
                    "tracks": p.tracks, "recurring": p.recurring,
                    "wav_stems": p.wav_stems, "commercial": p.commercial}
-                  for p in PLANS.values()],
+                  for p in PLANS.values() if p.slug != "unlimited"],
     }

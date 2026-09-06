@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+from unittest import mock
 
 from django.conf import settings
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -313,6 +314,13 @@ class CabinetTests(TestCase):
         self.assertEqual(response.status_code, 302)
         self.assertIn("/accounts/login/", response["Location"])
 
+    def test_purchase_list_hides_developer_plan(self):
+        self.client.force_login(self.user)
+        response = self.client.get("/cabinet/")
+        self.assertNotContains(response, 'data-plan="unlimited"',
+                               msg_prefix="безлимит разработчика не продаётся")
+        self.assertContains(response, 'data-plan="studio"')
+
     def test_cabinet_shows_plan_and_tracks(self):
         from .models import Project, RenderJob, Track
 
@@ -338,6 +346,51 @@ class CabinetTests(TestCase):
         self.assertEqual(response["Location"], "/cabinet/")
         self.assertTrue(self.client.session.get("_auth_user_id"))
 
+    def test_render_detail_page_shows_everything(self):
+        from .models import Project, RenderJob, Score, Stem, Track
+
+        project = Project.objects.create(owner=self.user, title="Мои треки")
+        track = Track.objects.create(project=project, title="Разбор трека")
+        job = RenderJob.objects.create(track=track, prompt="ню-метал",
+                                       status=RenderJob.STATUS_DONE,
+                                       result={"analysis": {"tempo": 132.5, "key_name": "D major"}},
+                                       spec={"tuning": "drop_c", "genre": "nu_metal"})
+        Stem.objects.create(job=job, name="guitar_rhythm", label="Ритм-гитара",
+                            file="stems/g.wav", rms_db=-12.0)
+        Score.objects.create(job=job, chord_chart="G | D | A | Em",
+                             tabs={"guitar_rhythm": "e|--0--|"}, key="D major")
+
+        self.client.force_login(self.user)
+        response = self.client.get(f"/cabinet/track/{job.pk}/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Разбор трека")
+        self.assertContains(response, "Ритм-гитара")
+        self.assertContains(response, "G | D | A | Em")
+        self.assertContains(response, "Таб: guitar_rhythm")
+        self.assertContains(response, "D major")
+
+    def test_render_detail_is_private(self):
+        from .models import Project, RenderJob, Track, User
+
+        stranger = User.objects.create_user(username="stranger", password="pass12345")
+        project = Project.objects.create(owner=stranger, title="Чужие треки")
+        track = Track.objects.create(project=project, title="Чужой трек")
+        job = RenderJob.objects.create(track=track)
+
+        self.client.force_login(self.user)
+        self.assertEqual(self.client.get(f"/cabinet/track/{job.pk}/").status_code, 404)
+
+    def test_cabinet_links_to_detail_page(self):
+        from .models import Project, RenderJob, Track
+
+        project = Project.objects.create(owner=self.user, title="Мои треки")
+        track = Track.objects.create(project=project, title="Мой трек")
+        job = RenderJob.objects.create(track=track, status=RenderJob.STATUS_DONE)
+
+        self.client.force_login(self.user)
+        response = self.client.get("/cabinet/")
+        self.assertContains(response, f"/cabinet/track/{job.pk}/")
+
     def test_billing_summary_endpoint(self):
         self.client.force_login(self.user)
         data = self.client.get("/api/billing/summary/").json()
@@ -359,3 +412,62 @@ def None_project():
     user, _ = User.objects.get_or_create(username="tester")
     project, _ = Project.objects.get_or_create(owner=user, title="Пустой проект")
     return project
+
+
+@override_settings(MEDIA_ROOT=MEDIA)
+class UnlimitedAccessTests(TestCase):
+    """Безлимит владельца сервиса."""
+
+    def setUp(self):
+        from .models import User
+
+        self.user = User.objects.create_user(username="dev", password="pass12345")
+
+    def test_staff_gets_unlimited_plan(self):
+        from . import billing
+
+        self.assertEqual(billing.plan_for(self.user).slug, "free")
+        self.user.is_staff = True
+        self.user.save()
+        plan = billing.plan_for(self.user)
+        self.assertEqual(plan.slug, "unlimited")
+        self.assertTrue(plan.wav_stems)
+        self.assertEqual(billing.check_quota(self.user).slug, "unlimited")
+
+    def test_unlimited_ignores_spent_tracks(self):
+        from . import billing
+        from .models import Project, RenderJob, Track
+
+        self.user.is_staff = True
+        self.user.save()
+        project = Project.objects.create(owner=self.user, title="Мои треки")
+        track = Track.objects.create(project=project, title="Трек")
+        for _ in range(5):
+            billing.charge(self.user, RenderJob.objects.create(track=track))
+        billing.check_quota(self.user)     # не должно бросить
+
+    def test_env_list_grants_unlimited(self):
+        from . import billing
+
+        with mock.patch.dict(os.environ, {"VIBETRACK_UNLIMITED_USERS": "dev, someone"}):
+            self.assertTrue(billing.is_unlimited(self.user))
+        with mock.patch.dict(os.environ, {"VIBETRACK_UNLIMITED_USERS": "someone"}):
+            self.assertFalse(billing.is_unlimited(self.user))
+
+    def test_grant_plan_command(self):
+        from django.core.management import call_command
+
+        from . import billing
+
+        call_command("grant_plan", "dev", "studio", "--days", "10")
+        self.assertEqual(billing.plan_for(self.user).slug, "studio")
+
+    def test_grant_plan_unlimited_flag(self):
+        from django.core.management import call_command
+
+        from . import billing
+
+        call_command("grant_plan", "dev", "--unlimited")
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.is_staff)
+        self.assertTrue(billing.is_unlimited(self.user))

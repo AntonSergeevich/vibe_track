@@ -153,7 +153,11 @@ CELERY_WORKER_MAX_TASKS_PER_CHILD = 8   # рендер держит память
 # Без брокера (локальная разработка, тесты) задачи выполняются синхронно
 CELERY_TASK_ALWAYS_EAGER = env_bool('CELERY_TASK_ALWAYS_EAGER', False)
 # Без Redis: выполнять задачи в фоновом потоке, чтобы работала полоса прогресса
-VIBETRACK_INLINE_WORKER = env_bool('VIBETRACK_INLINE_WORKER', False)
+# Eager-режим выполняет задачу внутри HTTP-запроса, и прогресс стоять будет
+# всегда — поэтому вместе с ним по умолчанию включаем фоновый поток
+VIBETRACK_INLINE_WORKER = env_bool('VIBETRACK_INLINE_WORKER', CELERY_TASK_ALWAYS_EAGER)
+# Папка с живыми сэмплами: барабанный луп и гитара
+VIBETRACK_SAMPLES_DIR = os.getenv('VIBETRACK_SAMPLES_DIR', str(BASE_DIR / 'samples'))
 CELERY_TASK_EAGER_PROPAGATES = True
 
 # ------------------------------------------------------------- Аудиодвижок

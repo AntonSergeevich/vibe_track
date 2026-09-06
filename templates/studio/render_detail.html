@@ -1,0 +1,108 @@
+{% load static %}<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0b0b0f">
+<title>{{ job.track.title }} — VibeTrack</title>
+<link rel="icon" href="{% static 'studio/favicon.svg' %}" type="image/svg+xml">
+<link rel="stylesheet" href="{% static 'studio/studio.css' %}">
+</head>
+<body>
+<header class="site-header">
+  <a class="logo" href="{% url 'studio' %}">
+    {% include 'studio/_logo.html' %}
+    <span class="logo-text">VIBE<span>TRACK</span></span>
+  </a>
+  <div class="header-spacer"></div>
+  <div class="header-links">
+    <a class="chip" href="{% url 'cabinet' %}">← Все треки</a>
+    <a class="chip" href="{% url 'studio' %}">В студию</a>
+  </div>
+  <p class="tagline">{{ job.track.title }} · {{ job.created_at|date:"d.m.Y H:i" }}</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Готовый трек</h2>
+    {% if job.prompt %}<p class="sub">{{ job.prompt }}</p>{% endif %}
+    {% if job.master %}
+    <div class="master">
+      <audio controls preload="metadata" src="{{ job.master.url }}"></audio>
+      <a class="btn small" href="{{ job.master.url }}" download>Скачать</a>
+    </div>
+    {% else %}
+      <p class="warnings">{{ job.error|default:"Мастер не готов" }}</p>
+    {% endif %}
+
+    <div class="analysis">
+      <span>Темп <b>{{ analysis.tempo|floatformat:0 }}</b></span>
+      <span>Тональность <b>{{ analysis.key_name|default:"—" }}</b></span>
+      <span>Строй <b>{{ job.spec.tuning|default:"—" }}</b></span>
+      <span>Стиль <b>{{ job.spec.genre|default:"—" }}</b></span>
+      <span>Длина <b>{{ analysis.duration|floatformat:0 }} с</b></span>
+    </div>
+    {% for w in job.warnings %}<p class="warnings">⚠ {{ w }}</p>{% endfor %}
+  </section>
+
+  <section class="card">
+    <h2>Дорожки</h2>
+    <p class="sub">{{ stems|length }} шт. — каждую можно послушать и скачать отдельно</p>
+    <div class="stems">
+      {% for stem in stems %}
+      <div class="stem">
+        <div><div class="name">{{ stem.label|default:stem.name }}</div>
+             <div class="lvl">{{ stem.rms_db|default:"—" }} dB RMS</div></div>
+        <audio controls preload="none" src="{{ stem.file.url }}"></audio>
+        <div class="stem-actions"><a class="btn small" href="{{ stem.file.url }}" download>↓</a></div>
+      </div>
+      {% empty %}<p class="hint">Дорожек нет.</p>{% endfor %}
+    </div>
+  </section>
+
+  {% if sheets %}
+  <section class="card">
+    <h2>Аккорды, текст и табы</h2>
+    <div class="tabs-nav" id="score-nav">
+      {% for name in sheets.keys %}
+      <button data-name="{{ forloop.counter0 }}"{% if forloop.first %} class="active"{% endif %}>{{ name }}</button>
+      {% endfor %}
+    </div>
+    {% for name, text in sheets.items %}
+    <pre class="score sheet" data-index="{{ forloop.counter0 }}"{% if not forloop.first %} hidden{% endif %}>{{ text }}</pre>
+    {% endfor %}
+  </section>
+  {% endif %}
+
+  {% if takes %}
+  <section class="card">
+    <h2>Записи голоса</h2>
+    <div class="stems">
+      {% for take in takes %}
+      <div class="stem">
+        <div><div class="name">{{ take.get_style_display|default:take.style }}</div>
+             <div class="lvl">{{ take.created_at|date:"d.m.Y H:i" }}</div></div>
+        {% if take.mixed_file %}<audio controls preload="none" src="{{ take.mixed_file.url }}"></audio>
+        <div class="stem-actions"><a class="btn small" href="{{ take.mixed_file.url }}" download>↓</a></div>
+        {% else %}<div class="lvl">{{ take.get_status_display }}</div><div></div>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+</main>
+
+<footer><p>VibeTrack</p></footer>
+<script>
+  const nav = document.getElementById('score-nav');
+  if (nav) nav.addEventListener('click', (e) => {
+    const btn = e.target.closest('button');
+    if (!btn) return;
+    [...nav.children].forEach((b) => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.sheet').forEach((s) => {
+      s.hidden = s.dataset.index !== btn.dataset.name;
+    });
+  });
+</script>
+</body>
+</html>

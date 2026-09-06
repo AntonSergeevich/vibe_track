@@ -9,6 +9,7 @@ from .audio_io import Audio
 from .dsp import (compressor, delay_fx, highpass, lowpass, normalize_active_rms, pan,
                   reverb, stereo_width)
 from . import instruments as ins
+from .sampler import SampleLibrary
 from .sequencer import Arrangement, Part
 
 # Единый номинальный уровень всех дорожек: дальше балансом рулит микшер,
@@ -29,12 +30,17 @@ PART_FX = {
 }
 
 
-def render_arrangement(arr: Arrangement, sr: int = SR) -> dict[str, Audio]:
-    """Возвращает {instrument_id: Audio} — по дорожке на инструмент."""
+def render_arrangement(arr: Arrangement, sr: int = SR,
+                       library: SampleLibrary | None = None) -> dict[str, Audio]:
+    """Возвращает {instrument_id: Audio} — по дорожке на инструмент.
+
+    Если передана библиотека сэмплов, живые записи заменяют синтез: это
+    единственное, что действительно приближает звук к настоящей группе.
+    """
     total = int((arr.duration + 3.0) * sr)
     stems: dict[str, Audio] = {}
     for part in arr.parts:
-        mono = _render_part(part, arr.spec, total, sr)
+        mono = _render_part(part, arr.spec, total, sr, library)
         if mono is None:
             continue
         placed = _place(part.instrument_id, mono, sr)
@@ -42,11 +48,17 @@ def render_arrangement(arr: Arrangement, sr: int = SR) -> dict[str, Audio]:
     return stems
 
 
-def _render_part(part: Part, spec: ArrangementSpec, total: int, sr: int) -> np.ndarray | None:
+def _render_part(part: Part, spec: ArrangementSpec, total: int, sr: int,
+                 library: SampleLibrary | None = None) -> np.ndarray | None:
     if part.kind == "drums":
         if part.instrument_id == "turntables":
             return _render_scratches(part, total, sr)
+        if library is not None and library.has_drums and part.instrument_id == "drums":
+            return _render_drums_sampled(part, total, sr, library)
         return _render_drums(part, total, sr)
+    if part.instrument_id in ("guitar_rhythm", "guitar_rhythm_r") \
+            and library is not None and library.has_guitar:
+        return _render_guitar_sampled(part, spec, total, sr, library)
     renderer = {
         "guitar_rhythm": _render_guitar,
         "guitar_rhythm_r": _render_guitar,
@@ -56,6 +68,42 @@ def _render_part(part: Part, spec: ArrangementSpec, total: int, sr: int) -> np.n
         "synth_stab": _render_stabs,
     }.get(part.instrument_id)
     return renderer(part, spec, total, sr) if renderer else None
+
+
+def _render_drums_sampled(part: Part, total: int, sr: int,
+                          library: SampleLibrary) -> np.ndarray:
+    """Барабаны живыми ударами из разобранного лупа."""
+    buf = np.zeros(total, dtype=np.float32)
+    counters: dict[str, int] = {}
+    for hit in part.hits:
+        counters[hit.voice] = counters.get(hit.voice, 0) + 1
+        sample = library.kit.get(hit.voice, counters[hit.voice])
+        if sample is None:
+            voice = ins.DRUM_VOICES.get(hit.voice)
+            if voice is None:
+                continue
+            sample = voice(sr, hit.vel)             # роли, которой нет в лупе, синтезируем
+        _add(buf, sample * hit.vel, int(hit.start * sr))
+    return compressor(buf, threshold_db=-16, ratio=4.0, attack_ms=5, release_ms=110, sr=sr)
+
+
+def _render_guitar_sampled(part: Part, spec: ArrangementSpec, total: int, sr: int,
+                           library: SampleLibrary) -> np.ndarray:
+    """Гитара живым сэмплом, переигранным по высоте каждой ноты."""
+    buf = np.zeros(total, dtype=np.float32)
+    sample = library.guitar
+    for note in part.notes:
+        sig = sample.play(ins.midi_to_hz(note.midi), note.dur, sr,
+                          velocity=note.vel, palm_mute=note.palm_mute)
+        _add(buf, sig, int(note.start * sr))
+
+    if sample.pre_amped:
+        # сэмпл уже с перегрузом: второй раз через усилитель — каша
+        buf = highpass(buf, 80, sr)
+        buf = lowpass(buf, 9000, sr)
+        return compressor(buf, threshold_db=-18, ratio=3.0, attack_ms=5, release_ms=90, sr=sr)
+    tone = ins.GuitarTone(drive=8.0 + 10.0 * spec.aggression)
+    return ins.amp(buf, tone, sr)
 
 
 def _add(buf: np.ndarray, sig: np.ndarray, start_sample: int) -> None:

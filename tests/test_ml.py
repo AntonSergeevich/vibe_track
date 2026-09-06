@@ -336,3 +336,113 @@ class TestDemucsContract(unittest.TestCase):
                         side_effect=ModelUnavailable("нет весов")):
             with self.assertRaises(ModelUnavailable):
                 get_demucs("htdemucs")
+
+
+class TestSampler(unittest.TestCase):
+    """Разбор пользовательских сэмплов: луп → удары, гитара → нота."""
+
+    @classmethod
+    def setUpClass(cls):
+        from engine import instruments as ins
+
+        cls.sr = 44100
+        loop = np.zeros(int(cls.sr * 4), dtype=np.float32)
+        step = int(cls.sr * 0.25)
+        voices = [ins.kick, lambda: ins.hihat(), ins.snare, lambda: ins.hihat()]
+        for bar in range(4):
+            for i, make in enumerate(voices):
+                pos = bar * 4 * step + i * step
+                hit = make()
+                end = min(pos + len(hit), len(loop))
+                loop[pos:end] += hit[: end - pos]
+        cls.loop = Audio(loop, cls.sr)
+        note = ins.amp(ins.pluck(ins.midi_to_hz(40), 1.0, cls.sr), ins.GuitarTone())
+        cls.note = Audio(note, cls.sr)
+
+    def test_loop_is_split_into_roles(self):
+        from engine.sampler import slice_drum_loop
+
+        kit = slice_drum_loop(self.loop, source="drums.wav")
+        for role in ("kick", "snare", "hat"):
+            self.assertIn(role, kit.hits, f"в лупе не найден {role}")
+            self.assertTrue(all(h.size > 0 for h in kit.hits[role]))
+        self.assertLessEqual(len(kit.hits["kick"]), 3, "храним не больше трёх вариантов на роль")
+
+    def test_classifier_recognises_each_voice(self):
+        from engine import instruments as ins
+        from engine.sampler import classify_hit
+
+        cases = {"kick": ins.kick(), "snare": ins.snare(), "hat": ins.hihat(),
+                 "crash": ins.crash()}
+        for expected, signal in cases.items():
+            role, _ = classify_hit(signal, self.sr)
+            self.assertEqual(role, expected)
+
+    def test_guitar_pitch_is_detected(self):
+        from engine import instruments as ins
+        from engine.sampler import extract_guitar_note
+
+        sample = extract_guitar_note(self.note, source="guitar.wav")
+        self.assertIsNotNone(sample)
+        self.assertAlmostEqual(sample.base_freq, ins.midi_to_hz(40), delta=3.0)
+
+    def test_repitched_note_lands_on_target(self):
+        from engine import instruments as ins
+        from engine.sampler import extract_guitar_note, detect_pitch
+
+        sample = extract_guitar_note(self.note, source="guitar.wav")
+        target = ins.midi_to_hz(47)                     # на квинту выше
+        played = sample.play(target, 0.6, self.sr)
+        self.assertAlmostEqual(detect_pitch(played, self.sr), target, delta=target * 0.05)
+
+    def test_palm_mute_is_shorter(self):
+        from engine.sampler import extract_guitar_note
+
+        sample = extract_guitar_note(self.note, source="guitar.wav")
+        muted = sample.play(110.0, 0.5, self.sr, palm_mute=True)
+        open_note = sample.play(110.0, 0.5, self.sr, palm_mute=False)
+        self.assertLess(float(np.abs(muted).sum()), float(np.abs(open_note).sum()),
+                        "заглушённая нота должна нести меньше энергии")
+
+    def test_missing_directory_is_not_an_error(self):
+        from engine.sampler import load_library
+
+        library = load_library("/nonexistent/samples")
+        self.assertFalse(library.has_drums)
+        self.assertFalse(library.has_guitar)
+
+    def test_library_reads_named_files(self):
+        import tempfile
+
+        from engine.audio_io import save
+        from engine.sampler import load_library
+
+        with tempfile.TemporaryDirectory() as tmp:
+            save(os.path.join(tmp, "bitcrushed-drums.wav"), self.loop)
+            save(os.path.join(tmp, "distorted-guitar.wav"), self.note)
+            library = load_library(tmp)
+
+        self.assertTrue(library.has_drums, "файл со словом drums должен стать китом")
+        self.assertTrue(library.has_guitar, "файл со словом guitar — гитарой")
+        self.assertEqual(len(library.notes), 2)
+
+    def test_render_uses_samples_when_available(self):
+        from engine.analysis import analyze
+        from engine.arrangement import parse_prompt
+        from engine.chords import recognize, to_power_chords
+        from engine.rendering import render_arrangement
+        from engine.sampler import load_library, slice_drum_loop, extract_guitar_note, SampleLibrary
+        from engine.sequencer import sequence
+
+        analysis = analyze(self.loop)
+        spec = parse_prompt("ню-метал drop C", analysis)
+        arrangement = sequence(analysis, to_power_chords(recognize(analysis)), spec)
+
+        library = SampleLibrary(kit=slice_drum_loop(self.loop),
+                                guitar=extract_guitar_note(self.note))
+        with_samples = render_arrangement(arrangement, self.sr, library=library)
+        synthesized = render_arrangement(arrangement, self.sr, library=None)
+
+        self.assertIn("drums", with_samples)
+        self.assertFalse(np.allclose(with_samples["drums"].data, synthesized["drums"].data),
+                         "с сэмплами барабаны должны звучать иначе, чем синтез")

@@ -57,12 +57,42 @@ def cabinet(request):
             .prefetch_related('stems')[:50])
     return render(request, 'studio/cabinet.html', {
         'billing': billing_service.summary(request.user),
-        'plans': billing_service.PLANS.values(),
+        'plans': [p for p in billing_service.PLANS.values()
+                  if p.slug not in ('free', 'unlimited')],
         'jobs': jobs,
         'payments': Payment.objects.filter(user=request.user)[:20],
         'subscription': Subscription.objects.filter(
             user=request.user, expires_at__gt=timezone.now()).first(),
         'usage': UsageRecord.objects.filter(user=request.user)[:20],
+    })
+
+
+@login_required
+def render_detail(request, pk: int):
+    """Страница одного результата: мастер, дорожки, аккорды, текст, табы."""
+    job = (RenderJob.objects
+           .select_related('track', 'track__project', 'score')
+           .prefetch_related('stems')
+           .filter(pk=pk).first())
+    if job is None or job.track.project.owner_id != request.user.id:
+        raise Http404('Трек не найден')
+
+    score = getattr(job, 'score', None)
+    sheets = {}
+    if score:
+        if score.lyric_sheet:
+            sheets['Текст с аккордами'] = score.lyric_sheet
+        if score.chord_chart:
+            sheets['Аккорды'] = score.chord_chart
+        for name, tab in (score.tabs or {}).items():
+            sheets[f'Таб: {name}'] = tab
+
+    return render(request, 'studio/render_detail.html', {
+        'job': job,
+        'analysis': (job.result or {}).get('analysis', {}),
+        'stems': job.stems.all(),
+        'sheets': sheets,
+        'takes': job.vocal_takes.all()[:10],
     })
 
 

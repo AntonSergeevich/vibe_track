@@ -3,6 +3,58 @@
   const $ = (sel) => document.querySelector(sel);
   const api = (path) => `/api/${path}`;
   const state = { track: null, job: null, poll: null, genre: 'nu_metal' };
+  const STORE_KEY = 'vibetrack.session';
+
+  /* Состояние переживает перезагрузку страницы: рендер идёт на сервере, и
+     закрытая вкладка не должна означать потерянный трек. */
+  function remember() {
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify({
+        track: state.track ? { id: state.track.id, title: state.track.title } : null,
+        job: state.job ? state.job.id : null,
+        genre: state.genre,
+      }));
+    } catch { /* приватный режим — просто не запоминаем */ }
+  }
+
+  function forget() {
+    try { localStorage.removeItem(STORE_KEY); } catch { /* нечего чистить */ }
+  }
+
+  async function restore() {
+    let saved = null;
+    try { saved = JSON.parse(localStorage.getItem(STORE_KEY) || 'null'); } catch { return; }
+    if (!saved || !saved.track) return;
+
+    state.track = saved.track;
+    state.genre = saved.genre || 'nu_metal';
+    document.querySelectorAll('.genre').forEach((g) =>
+      g.classList.toggle('active', g.dataset.genre === state.genre));
+    $('#track-name').textContent = saved.track.title;
+    $('#track-meta').textContent = `трек #${saved.track.id} · восстановлен`;
+    $('#track-chip').classList.remove('hidden');
+    dropzone.classList.add('hidden');
+    $('#step-style').classList.remove('hidden');
+
+    if (!saved.job) return;
+    try {
+      const st = await request(`renders/${saved.job}/status/`);
+      state.job = { id: saved.job };
+      if (st.status === 'done') {
+        showResult();
+      } else if (st.status === 'error') {
+        $('#progress').classList.remove('hidden');
+        setProgress(0, 'error', `Ошибка: ${(st.error || '').split('\n')[0]}`);
+      } else {
+        $('#progress').classList.remove('hidden');
+        $('#run').disabled = true;
+        setProgress(st.progress, st.stage || st.status);
+        pollJob();                      // обработка идёт дальше — просто снова следим
+      }
+    } catch {
+      forget();                         // рендер удалён или чужой — начинаем заново
+    }
+  }
 
   const STAGE_NAMES = {
     load: 'Читаю файл', analyze: 'Определяю темп и тональность',
@@ -52,6 +104,8 @@
     $('#track-chip').classList.add('hidden');
     dropzone.classList.remove('hidden');
     $('#file').value = '';
+    state.track = null; state.job = null;
+    forget();
   });
 
   function upload(file) {
@@ -88,6 +142,8 @@
         return;
       }
       state.track = data;
+      state.job = null;
+      remember();
       $('#track-name').textContent = data.title;
       $('#track-meta').textContent = `${(file.size / 1048576).toFixed(1)} МБ · трек #${data.id}`;
       $('#track-chip').classList.remove('hidden');
@@ -107,6 +163,7 @@
     if (!card) return;
     document.querySelectorAll('.genre').forEach((g) => g.classList.toggle('active', g === card));
     state.genre = card.dataset.genre;
+    remember();
   });
 
   $('#aggression').addEventListener('input', (e) => { $('#aggr-out').value = e.target.value; });
@@ -157,6 +214,7 @@
           options: { manual_lyrics: $('#manual-lyrics').value },
         },
       });
+      remember();
       pollJob();
     } catch (err) {
       $('#run').disabled = false;
@@ -197,7 +255,10 @@
     $('#run').disabled = false;
     $('#step-result').classList.remove('hidden');
     $('#step-vocal').classList.remove('hidden');
-    $('#warnings').innerHTML = (job.warnings || []).map((w) => `⚠ ${w}`).join('<br>');
+    $('#warnings').innerHTML = [
+      ...(job.warnings || []).map((w) => `⚠ ${w}`),
+      `<a class="chip" href="/cabinet/track/${job.id}/">Открыть страницу трека — она сохранится в кабинете</a>`,
+    ].join('<br>');
     $('#master').src = job.master_url;
     $('#master-dl').href = job.master_url;
 
@@ -244,6 +305,8 @@
       $('#score-view').textContent = views[btn.dataset.name];
     };
   }
+
+  restore();
 
   /* ----------------------------------------------------- запись голоса */
   let recorder = null; let chunks = []; let timer = null; let started = 0;

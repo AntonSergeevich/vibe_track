@@ -20,6 +20,7 @@ from .audio_io import Audio, load, save
 from .chords import ChordEvent, recognize, to_power_chords, transpose as transpose_chords
 from .mixing import MixSettings, build_gains, mixdown, stem_report
 from .rendering import render_arrangement
+from .sampler import SampleLibrary, load_library, library_dir
 from .separation import separate
 from .sequencer import Arrangement, sequence
 from .tabs import chord_chart, render_tab, tab_for_all
@@ -46,6 +47,7 @@ class RenderOptions:
     separation_backend: str = "auto"      # auto | demucs | dsp
     max_duration: float = 480.0           # защита от гигантских файлов
     use_llm: bool = True                  # уточнять описание через LLM, если она настроена
+    samples_dir: str = ""                 # папка с живыми сэмплами (пусто = из настроек)
     lyrics_language: str = ""             # пусто = определить автоматически
 
 
@@ -157,7 +159,14 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
     timer.mark("arrange")
 
     _progress("render", 60)
-    stems = render_arrangement(arrangement, SR)
+    library = load_library(options.samples_dir or library_dir(), SR)
+    if library.notes:
+        for note in library.notes:
+            logger.info("Сэмплы: %s", note)
+    if not (library.has_drums or library.has_guitar):
+        warnings.append("Живых сэмплов не найдено — инструменты синтезируются. "
+                        "Положите барабанный луп и гитару в папку samples/.")
+    stems = render_arrangement(arrangement, SR, library=library)
     timer.mark("render")
 
     _progress("vocals", 78)

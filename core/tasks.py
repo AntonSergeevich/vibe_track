@@ -85,6 +85,7 @@ def _engine_options(job: RenderJob) -> RenderOptions:
         separation_backend=options.get("separation_backend", cfg["SEPARATION_BACKEND"]),
         max_duration=cfg["MAX_DURATION"],
         use_llm=options.get("use_llm", True),
+        samples_dir=str(getattr(settings, "VIBETRACK_SAMPLES_DIR", "")),
         lyrics_language=options.get("lyrics_language", "") or "",
     )
 
