@@ -651,6 +651,21 @@ class TestStabilityProvider(unittest.TestCase):
         with mock.patch.dict(os.environ, {"VIBETRACK_STABILITY_MAX_SECONDS": "60"}):
             self.assertEqual(stability_limit(), 60.0, "вниз ограничивать можно")
 
+    def test_copyright_refusal_is_explained_to_a_human(self):
+        """422 — фильтр авторских прав, а не поломка. Человеку нужен выход."""
+        from engine.generation import CoverRequest, generate_cover
+
+        session = _FakeStabilitySession(self.audio_bytes, status=422, payload={
+            "errors": ["Our system has detected the presence of copyrighted content"]})
+        with mock.patch.dict(os.environ, self._env()):
+            result = generate_cover(CoverRequest(self.source_path, "nu metal"),
+                                    session=session)
+
+        self.assertFalse(result.ok)
+        self.assertIn("авторским правом", result.error)
+        self.assertIn("короткий кусок", result.error,
+                      "отказ должен подсказывать, что делать дальше")
+
     def test_steps_stay_inside_the_accepted_range(self):
         """stable-audio-2 принимает steps только 30-100.
 

@@ -481,6 +481,66 @@ class StalledJobTests(TestCase):
         self.assertEqual(billing.used_this_period(self.user), 0)
 
 
+class CleanupCommandTests(TestCase):
+    """Уборка диска: показывает по умолчанию, удаляет только по просьбе."""
+
+    def setUp(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from .models import Project, Track, User
+
+        self.dir = tempfile.mkdtemp(prefix="vibetrack-clean-")
+        user = User.objects.create_user(username="tidy", password="pass12345")
+        project = Project.objects.create(owner=user, title="Мои треки")
+        track = Track.objects.create(project=project, title="Трек")
+
+        self.fresh = RenderJob.objects.create(track=track)
+        self.old = RenderJob.objects.create(track=track)
+        RenderJob.objects.filter(pk=self.old.pk).update(
+            created_at=timezone.now() - timedelta(days=90))
+
+        for job in (self.fresh, self.old):
+            folder = os.path.join(self.dir, "renders", f"job_{job.pk}")
+            os.makedirs(folder)
+            with open(os.path.join(folder, "master.mp3"), "wb") as fh:
+                fh.write(b"0" * 1024)
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _run(self, **kwargs):
+        from io import StringIO
+
+        from django.core.management import call_command
+
+        out = StringIO()
+        with override_settings(MEDIA_ROOT=self.dir):
+            call_command("cleanup", stdout=out, **kwargs)
+        return out.getvalue()
+
+    def test_dry_run_touches_nothing(self):
+        output = self._run(days=30)
+        self.assertIn("только показ", output)
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "renders", f"job_{self.old.pk}")),
+                        "без --yes ничего удалять нельзя")
+
+    def test_removes_old_renders_and_keeps_fresh_ones(self):
+        self._run(days=30, yes=True)
+        self.assertFalse(os.path.exists(os.path.join(self.dir, "renders", f"job_{self.old.pk}")))
+        self.assertTrue(os.path.exists(os.path.join(self.dir, "renders", f"job_{self.fresh.pk}")),
+                        "свежий рендер трогать нельзя")
+        self.assertFalse(RenderJob.objects.filter(pk=self.old.pk).exists())
+        self.assertTrue(RenderJob.objects.filter(pk=self.fresh.pk).exists())
+
+    def test_report_names_the_model_cache(self):
+        """Веса моделей — главный пожиратель системного диска, их видно всегда."""
+        output = self._run(days=30)
+        self.assertIn("Веса моделей", output)
+        self.assertIn("Кэш Hugging Face", output)
+
+
 class CoverLimitTests(TestCase):
     """Лимит генераций у внешней модели — он же защита от работы в минус."""
 

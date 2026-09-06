@@ -159,6 +159,16 @@ def stability_generate(request: CoverRequest, session=None) -> Audio:
         if os.path.exists(prepared):
             os.remove(prepared)
 
+    if response.status_code == 422:
+        # Фильтр авторских прав. Срабатывает и на чужой музыке, и на своей —
+        # достаточно похожего фрагмента в их базе. Пользователю нужен не код
+        # ответа, а понимание, что делать дальше.
+        raise RuntimeError(
+            "Нейросеть отказалась обрабатывать этот трек: её фильтр счёл "
+            "материал защищённым авторским правом. Так бывает и со своими "
+            "записями. Попробуйте другой фрагмент — короткий кусок проходит "
+            "чаще, чем целая песня."
+            f" (ответ сервиса: {_error_text(response)})")
     if response.status_code != 200:
         raise RuntimeError(f"Stability ответил {response.status_code}: "
                            f"{_error_text(response)}")
