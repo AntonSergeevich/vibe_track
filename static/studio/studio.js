@@ -211,7 +211,10 @@
         body: {
           prompt: $('#prompt').value,
           overrides: collectOverrides(),
-          options: { manual_lyrics: $('#manual-lyrics').value },
+          options: {
+            manual_lyrics: $('#manual-lyrics').value,
+            generate_cover: $('#want-cover').checked,
+          },
         },
       });
       remember();

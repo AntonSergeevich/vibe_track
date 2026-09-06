@@ -86,6 +86,7 @@ def _engine_options(job: RenderJob) -> RenderOptions:
         max_duration=cfg["MAX_DURATION"],
         use_llm=options.get("use_llm", True),
         samples_dir=str(getattr(settings, "VIBETRACK_SAMPLES_DIR", "")),
+        generate_cover=options.get("generate_cover", False),
         lyrics_language=options.get("lyrics_language", "") or "",
     )
 
@@ -145,6 +146,7 @@ def _store_result(job: RenderJob, result) -> None:
         "analysis": result.analysis,
         "report": result.report,
         "timings": result.timings,
+        "cover_cost_usd": result.cover_cost_usd,
         "arrangement_bars": len(result.arrangement.get("bars", [])),
     }
     job.status = RenderJob.STATUS_DONE
@@ -156,6 +158,9 @@ def _store_result(job: RenderJob, result) -> None:
     job.track.save(update_fields=["analysis"])
 
     job.stems.all().delete()
+    if result.cover_path:
+        Stem.objects.create(job=job, name="cover", label="Кавер от нейросети",
+                            file=relative_to_media(result.cover_path), source="generated")
     for name, path in result.stem_paths.items():
         info = result.report.get(name, {})
         Stem.objects.create(

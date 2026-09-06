@@ -446,3 +446,123 @@ class TestSampler(unittest.TestCase):
         self.assertIn("drums", with_samples)
         self.assertFalse(np.allclose(with_samples["drums"].data, synthesized["drums"].data),
                          "с сэмплами барабаны должны звучать иначе, чем синтез")
+
+
+class _FakeHttpResponse:
+    """Ответ HTTP-провайдера. Имя не _FakeResponse: так уже называется
+    заглушка ответа LLM выше, и переопределение молча ломало её тесты."""
+
+    def __init__(self, payload=None, content=b"", status=200):
+        self._payload, self.content, self.status_code = payload, content, status
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class _FakeSession:
+    """Провайдер, отвечающий по общей схеме: отправить → опросить → скачать."""
+
+    def __init__(self, audio_bytes: bytes, statuses=("processing", "succeeded")):
+        self.audio_bytes = audio_bytes
+        self.statuses = list(statuses)
+        self.posts, self.gets = [], []
+
+    def post(self, url, headers=None, data=None, files=None, timeout=None):
+        self.posts.append({"url": url, "data": data, "files": list(files or {})})
+        return _FakeHttpResponse({"id": "job-1"})
+
+    def get(self, url, headers=None, timeout=None):
+        self.gets.append(url)
+        if url.endswith(".mp3"):
+            return _FakeHttpResponse(content=self.audio_bytes)
+        status = self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+        return _FakeHttpResponse({"status": status, "output": "https://cdn.test/result.mp3"})
+
+
+class TestGeneration(unittest.TestCase):
+    """Подключение внешней нейросети-генератора."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+
+        from engine.audio_io import save
+
+        cls.tmp = tempfile.mkdtemp(prefix="vibetrack-gen-")
+        rng = np.random.default_rng(2)
+        source = Audio((rng.standard_normal((2, 44100 * 2)) * 0.1).astype(np.float32))
+        cls.source_path = save(os.path.join(cls.tmp, "source.wav"), source)
+        with open(cls.source_path, "rb") as fh:
+            cls.audio_bytes = fh.read()
+
+    def _env(self, **extra):
+        config = {
+            "submit_url": "https://api.test/generate",
+            "status_url": "https://api.test/jobs/{job_id}",
+            "poll_seconds": 0,
+        }
+        env = {
+            "VIBETRACK_MUSIC_PROVIDER": "custom",
+            "VIBETRACK_MUSIC_API_KEY": "secret",
+            "VIBETRACK_MUSIC_API_CONFIG": json.dumps(config),
+        }
+        env.update(extra)
+        return env
+
+    def test_not_configured_by_default(self):
+        from engine.generation import CoverRequest, generate_cover, is_configured
+
+        with mock.patch.dict(os.environ, {"VIBETRACK_MUSIC_PROVIDER": "none",
+                                          "VIBETRACK_MUSIC_API_KEY": ""}):
+            self.assertFalse(is_configured())
+            result = generate_cover(CoverRequest(self.source_path, "nu metal"))
+        self.assertFalse(result.ok)
+        self.assertIn("не настроен", result.error)
+
+    def test_full_cycle_submit_poll_download(self):
+        from engine.generation import CoverRequest, generate_cover
+
+        session = _FakeSession(self.audio_bytes)
+        with mock.patch.dict(os.environ, self._env()):
+            result = generate_cover(
+                CoverRequest(self.source_path, "aggressive nu metal", genre="nu_metal"),
+                session=session)
+
+        self.assertTrue(result.ok, result.error)
+        self.assertGreater(result.audio.duration, 1.0)
+        self.assertEqual(result.provider, "custom")
+        self.assertGreater(result.cost_usd, 0, "стоимость нужна для расчёта себестоимости")
+        self.assertEqual(session.posts[0]["url"], "https://api.test/generate")
+        self.assertIn("audio", session.posts[0]["files"], "исходный трек уходит файлом")
+        self.assertEqual(session.posts[0]["data"]["prompt"], "aggressive nu metal")
+
+    def test_provider_failure_does_not_break_render(self):
+        from engine.generation import CoverRequest, generate_cover
+
+        session = _FakeSession(self.audio_bytes, statuses=("failed",))
+        with mock.patch.dict(os.environ, self._env()):
+            result = generate_cover(CoverRequest(self.source_path, "nu metal"), session=session)
+
+        self.assertFalse(result.ok)
+        self.assertIn("failed", result.error)
+
+    def test_style_prompts_cover_every_genre(self):
+        from engine.arrangement import GENRES
+        from engine.generation import style_prompt_for
+
+        for genre in GENRES:
+            prompt = style_prompt_for(genre)
+            self.assertGreater(len(prompt), 20, genre)
+            self.assertNotIn("heavy rock with distorted guitars", prompt,
+                             f"{genre}: используется заглушка вместо своего описания")
+
+    def test_config_path_extraction(self):
+        from engine.generation import _dig
+
+        data = {"output": {"files": [{"url": "https://cdn/x.mp3"}]}}
+        self.assertEqual(_dig(data, "output.files.0.url"), "https://cdn/x.mp3")
+        self.assertIsNone(_dig(data, "output.missing.url"))

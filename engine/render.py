@@ -18,6 +18,7 @@ from .arrangement import ArrangementSpec, parse_prompt
 from .llm import refine as llm_refine
 from .audio_io import Audio, load, save
 from .chords import ChordEvent, recognize, to_power_chords, transpose as transpose_chords
+from .generation import CoverRequest, generate_cover, is_configured as generation_configured, style_prompt_for
 from .mixing import MixSettings, build_gains, mixdown, stem_report
 from .rendering import render_arrangement
 from .sampler import SampleLibrary, load_library, library_dir
@@ -48,6 +49,7 @@ class RenderOptions:
     max_duration: float = 480.0           # защита от гигантских файлов
     use_llm: bool = True                  # уточнять описание через LLM, если она настроена
     samples_dir: str = ""                 # папка с живыми сэмплами (пусто = из настроек)
+    generate_cover: bool = False          # заказать кавер у внешней нейросети
     lyrics_language: str = ""             # пусто = определить автоматически
 
 
@@ -55,6 +57,8 @@ class RenderOptions:
 class RenderResult:
     out_dir: str
     master_path: str = ""
+    cover_path: str = ""                  # кавер от внешней модели, если заказан
+    cover_cost_usd: float = 0.0
     stem_paths: dict[str, str] = field(default_factory=dict)
     analysis: dict = field(default_factory=dict)
     spec: dict = field(default_factory=dict)
@@ -71,6 +75,7 @@ class RenderResult:
     def to_dict(self) -> dict:
         return {
             "out_dir": self.out_dir, "master_path": self.master_path,
+            "cover_path": self.cover_path, "cover_cost_usd": self.cover_cost_usd,
             "stem_paths": self.stem_paths, "analysis": self.analysis, "spec": self.spec,
             "arrangement": self.arrangement, "chords": self.chords, "lyrics": self.lyrics,
             "lyric_sheet": self.lyric_sheet, "chord_chart": self.chord_chart,
@@ -201,8 +206,27 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
         stem_paths[f"source_{name}"] = save(os.path.join(stems_dir, f"source_{name}.{ext}"), audio)
     master_path = save(os.path.join(out_dir, f"master.{ext}"), master)
 
+    cover_path, cover_cost = "", 0.0
+    if options.generate_cover:
+        if not generation_configured():
+            warnings.append("Кавер не заказан: внешняя нейросеть не настроена "
+                            "(VIBETRACK_MUSIC_PROVIDER и ключ).")
+        else:
+            _progress("cover", 97)
+            cover = generate_cover(CoverRequest(
+                source_path=source_path,
+                style_prompt=style_prompt_for(spec.genre, " ".join(spec.notes)),
+                genre=spec.genre, duration=analysis.duration))
+            if cover.ok:
+                cover_path = save(os.path.join(out_dir, f"cover.{ext}"), cover.audio)
+                cover_cost = cover.cost_usd
+                logger.info("Кавер от %s за %.0f с", cover.provider, cover.seconds)
+            else:
+                warnings.append(f"Кавер не получился: {cover.error}")
+
     result = RenderResult(
-        out_dir=out_dir, master_path=master_path, stem_paths=stem_paths,
+        out_dir=out_dir, master_path=master_path, cover_path=cover_path,
+        cover_cost_usd=cover_cost, stem_paths=stem_paths,
         analysis=analysis.to_dict(), spec=spec.to_dict(), arrangement=arrangement.to_dict(),
         chords=[c.to_dict() for c in chords], lyrics=lyrics.to_dict(), lyric_sheet=sheet,
         chord_chart=chord_chart(chords), tabs=tabs,

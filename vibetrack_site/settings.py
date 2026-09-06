@@ -169,6 +169,8 @@ VIBETRACK = {
     'SEPARATION_BACKEND': os.getenv('VIBETRACK_SEPARATION_BACKEND', 'auto'),  # auto|demucs|dsp
     'WHISPER_MODEL': os.getenv('VIBETRACK_WHISPER_MODEL', 'small'),
     'MASTER_LOUDNESS_DB': float(os.getenv('VIBETRACK_MASTER_LOUDNESS_DB', -10.0)),
+    # Внешняя нейросеть-генератор: none | suno_proxy | elevenlabs | stability | custom
+    'MUSIC_PROVIDER': os.getenv('VIBETRACK_MUSIC_PROVIDER', 'none'),
 }
 
 LOGGING = {

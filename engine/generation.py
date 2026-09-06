@@ -1,0 +1,217 @@
+"""Генерация кавера через внешний API.
+
+Локально генеративную модель не запустить: нужна видеокарта и Python 3.11.
+Зато почти все сервисы устроены одинаково — отправить трек, дождаться
+готовности, скачать результат. Поэтому здесь один настраиваемый адаптер, а
+не пять разных: провайдер меняется переменными окружения.
+
+Важное ограничение, о котором легко забыть: генеративная модель возвращает
+готовый микс. Ни отдельных дорожек, ни нот для табулатуры из него не
+достать — поэтому кавер живёт рядом с нашим разбором, а не вместо него.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import time
+from dataclasses import dataclass, field
+
+from .audio_io import Audio, load
+
+logger = logging.getLogger(__name__)
+
+# Ориентиры стоимости за трек, доллары. Нужны, чтобы считать себестоимость
+# рендера ещё до счёта от провайдера.
+COST_HINTS = {
+    "suno_proxy": 0.10,
+    "elevenlabs": 0.53,
+    "stability": 0.20,
+    "custom": 0.20,
+}
+
+
+@dataclass
+class CoverRequest:
+    source_path: str
+    style_prompt: str
+    genre: str = ""
+    duration: float = 0.0
+    keep_vocals: bool = True
+
+
+@dataclass
+class CoverResult:
+    audio: Audio | None = None
+    provider: str = "none"
+    cost_usd: float = 0.0
+    seconds: float = 0.0
+    notes: list[str] = field(default_factory=list)
+    error: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.audio is not None
+
+
+class ProviderNotConfigured(RuntimeError):
+    pass
+
+
+def provider_name() -> str:
+    return os.getenv("VIBETRACK_MUSIC_PROVIDER", "none").strip().lower()
+
+
+def is_configured() -> bool:
+    return provider_name() not in ("", "none") and bool(os.getenv("VIBETRACK_MUSIC_API_KEY"))
+
+
+def generate_cover(request: CoverRequest, session=None) -> CoverResult:
+    """Отправляет трек провайдеру и возвращает готовый кавер."""
+    name = provider_name()
+    if not is_configured():
+        return CoverResult(provider=name or "none",
+                           error="Провайдер генерации не настроен: задайте "
+                                 "VIBETRACK_MUSIC_PROVIDER и VIBETRACK_MUSIC_API_KEY.")
+    started = time.time()
+    try:
+        audio = _http_generate(request, session=session)
+    except Exception as exc:  # noqa: BLE001 — внешний сервис не должен ронять рендер
+        logger.warning("Генерация через %s не удалась: %s", name, exc)
+        return CoverResult(provider=name, error=str(exc),
+                           seconds=round(time.time() - started, 2))
+    return CoverResult(audio=audio, provider=name,
+                       cost_usd=COST_HINTS.get(name, COST_HINTS["custom"]),
+                       seconds=round(time.time() - started, 2),
+                       notes=[f"Кавер сгенерирован провайдером {name}"])
+
+
+def _config() -> dict:
+    """Описание запросов провайдера.
+
+    Живёт в переменной окружения как JSON, чтобы подключение нового сервиса
+    не требовало правки кода:
+
+        VIBETRACK_MUSIC_API_CONFIG='{"submit_url": "...", "audio_field": "audio",
+          "prompt_field": "prompt", "job_id_path": "id",
+          "status_url": "https://.../{job_id}", "status_path": "status",
+          "done_values": ["succeeded"], "result_path": "output.audio"}'
+    """
+    raw = os.getenv("VIBETRACK_MUSIC_API_CONFIG", "").strip()
+    config = json.loads(raw) if raw else {}
+    config.setdefault("submit_url", os.getenv("VIBETRACK_MUSIC_API_URL", ""))
+    config.setdefault("audio_field", "audio")
+    config.setdefault("prompt_field", "prompt")
+    config.setdefault("job_id_path", "id")
+    config.setdefault("status_path", "status")
+    config.setdefault("done_values", ["succeeded", "completed", "done", "complete"])
+    config.setdefault("failed_values", ["failed", "error", "canceled"])
+    config.setdefault("result_path", "output")
+    config.setdefault("poll_seconds", 5)
+    config.setdefault("timeout_seconds", 600)
+    if not config["submit_url"]:
+        raise ProviderNotConfigured("Не задан адрес API генерации")
+    return config
+
+
+def _dig(data, path: str):
+    """Достаёт значение по пути вида 'output.audio.url'."""
+    value = data
+    for key in path.split("."):
+        if isinstance(value, list):
+            value = value[int(key)] if key.isdigit() else (value[0] if value else None)
+            continue
+        if not isinstance(value, dict):
+            return None
+        value = value.get(key)
+        if value is None:
+            return None
+    return value
+
+
+def _http_generate(request: CoverRequest, session=None) -> Audio:
+    """Отправить → дождаться → скачать. Общая схема почти всех сервисов."""
+    import requests
+
+    session = session or requests.Session()
+    config = _config()
+    key = os.getenv("VIBETRACK_MUSIC_API_KEY", "")
+    headers = {"Authorization": f"Bearer {key}"}
+    extra = os.getenv("VIBETRACK_MUSIC_API_HEADERS", "").strip()
+    if extra:
+        headers.update(json.loads(extra))
+
+    payload = {
+        config["prompt_field"]: request.style_prompt,
+        "genre": request.genre,
+        "duration": request.duration,
+        "keep_vocals": request.keep_vocals,
+    }
+    payload.update(json.loads(os.getenv("VIBETRACK_MUSIC_API_EXTRA", "{}") or "{}"))
+
+    with open(request.source_path, "rb") as fh:
+        response = session.post(config["submit_url"], headers=headers, data=payload,
+                                files={config["audio_field"]: fh}, timeout=120)
+    response.raise_for_status()
+    submitted = response.json()
+
+    result_url = _dig(submitted, config["result_path"])
+    if not result_url:                       # синхронного ответа не было — опрашиваем
+        result_url = _poll(session, headers, config, submitted)
+
+    downloaded = session.get(result_url, headers=headers, timeout=300)
+    downloaded.raise_for_status()
+
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        tmp.write(downloaded.content)
+        tmp_path = tmp.name
+    try:
+        return load(tmp_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def _poll(session, headers: dict, config: dict, submitted: dict) -> str:
+    job_id = _dig(submitted, config["job_id_path"])
+    if job_id is None:
+        raise RuntimeError(f"В ответе нет идентификатора задачи: {submitted}")
+
+    status_url = config.get("status_url", "").format(job_id=job_id)
+    if not status_url:
+        raise RuntimeError("Не задан адрес проверки статуса (status_url)")
+
+    deadline = time.time() + config["timeout_seconds"]
+    while time.time() < deadline:
+        response = session.get(status_url, headers=headers, timeout=60)
+        response.raise_for_status()
+        data = response.json()
+        status = str(_dig(data, config["status_path"]) or "").lower()
+
+        if status in [s.lower() for s in config["failed_values"]]:
+            raise RuntimeError(f"Провайдер вернул статус «{status}»")
+        if status in [s.lower() for s in config["done_values"]]:
+            url = _dig(data, config["result_path"])
+            if not url:
+                raise RuntimeError(f"Задача готова, но нет ссылки на результат: {data}")
+            return url
+        time.sleep(config["poll_seconds"])
+    raise TimeoutError("Провайдер не ответил за отведённое время")
+
+
+def style_prompt_for(genre: str, spec_notes: str = "") -> str:
+    """Текстовое описание стиля на английском — его понимают все сервисы."""
+    prompts = {
+        "nu_metal": "aggressive nu metal, downtuned seven-string guitars, syncopated groove, heavy drums",
+        "metalcore": "modern metalcore, tight palm-muted riffs, double kick drums, breakdown",
+        "alt_rock": "alternative rock, melodic guitars, driving drums, anthemic",
+        "grunge": "90s grunge, dirty distorted guitars, loose drums, raw production",
+        "punk": "fast punk rock, simple power chords, energetic drums",
+        "industrial": "industrial metal, mechanical groove, synth stabs, heavy guitars",
+        "trap_metal": "trap metal, 808 bass, sparse heavy guitars, half-time beat",
+        "hard_rock": "classic hard rock, riff driven, live drums",
+    }
+    base = prompts.get(genre, "heavy rock with distorted guitars")
+    return f"{base}. {spec_notes}".strip()
