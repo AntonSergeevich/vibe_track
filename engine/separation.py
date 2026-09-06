@@ -84,10 +84,16 @@ def _separate_demucs(audio: Audio, model: str) -> SeparationResult:
     wav = torch.from_numpy(np.ascontiguousarray(source.data)).float()
     with torch.no_grad():
         _, sources = separator.separate_tensor(wav, sr=model_sr)
+    del wav, source                      # исходник больше не нужен, он весь в sources
 
+    # Забираем дорожки по одной и сразу отпускаем тензор: иначе на трёхминутном
+    # треке одновременно живут и четыре тензора Torch, и четыре копии numpy —
+    # лишние сотни мегабайт ровно там, где память и заканчивается.
     stems: dict[str, Audio] = {}
-    for name, tensor in sources.items():
+    for name in list(sources):
+        tensor = sources.pop(name)
         data = tensor.detach().cpu().numpy().astype(np.float32)
+        del tensor
         stem = Audio(data, model_sr)
         stems[name] = resample(stem, audio.sr) if model_sr != audio.sr else stem
 

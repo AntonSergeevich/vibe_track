@@ -136,6 +136,20 @@ def render_track(self, job_id: int) -> dict:
             options=_engine_options(job),
             progress=progress,
         )
+    except MemoryError as exc:
+        # numpy сообщает об этом по-английски и в терминах массивов — человеку
+        # нужно знать, что делать, а не сколько мегабайт не хватило
+        logger.exception("Рендеру #%s не хватило памяти", job.pk)
+        job.status = RenderJob.STATUS_ERROR
+        job.stage = "error"
+        job.error = ("Не хватило оперативной памяти на трек такой длины. "
+                     "Закройте тяжёлые программы и попробуйте снова или "
+                     "загрузите трек покороче.\n"
+                     f"{exc}")
+        job.save(update_fields=["status", "stage", "error", "updated_at"])
+        billing.refund(job.track.project.owner, job, "не хватило памяти")
+        billing.refund_cover(job.track.project.owner, job, "не хватило памяти")
+        return {"status": "error", "detail": job.error}
     except Exception as exc:  # noqa: BLE001 — пользователю нужен текст ошибки
         logger.exception("Рендер #%s упал", job.pk)
         job.status = RenderJob.STATUS_ERROR

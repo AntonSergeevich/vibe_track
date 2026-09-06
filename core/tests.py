@@ -390,6 +390,35 @@ class QueueFallbackTests(TestCase):
         self.assertTrue(done.wait(5))
 
 
+class MemoryErrorTests(TestCase):
+    """Нехватка памяти должна объясняться по-человечески и возвращать списание."""
+
+    def test_render_explains_memory_error_and_refunds(self):
+        from .models import Project, RenderJob, Track, User
+        from . import billing
+        from .tasks import render_track
+
+        user = User.objects.create_user(username="drummer", password="pass12345")
+        project = Project.objects.create(owner=user, title="Мои треки")
+        track = Track.objects.create(project=project, title="Длинный трек")
+        AudioFile.objects.create(track=track, file="audio/x.wav",
+                                 kind=AudioFile.KIND_SOURCE, status="done")
+        job = RenderJob.objects.create(track=track, options={"generate_cover": True})
+        billing.charge(user, job)
+        billing.charge_cover(user, job)
+
+        with mock.patch("core.tasks.transform",
+                        side_effect=MemoryError("Unable to allocate 135. MiB")):
+            render_track(job.pk)
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, RenderJob.STATUS_ERROR)
+        self.assertIn("памяти", job.error)
+        self.assertIn("покороче", job.error, "человеку нужен выход, а не диагноз")
+        self.assertEqual(billing.used_this_period(user), 0, "списание вернули")
+        self.assertEqual(billing.covers_used_this_period(user), 0)
+
+
 class CoverLimitTests(TestCase):
     """Лимит генераций у внешней модели — он же защита от работы в минус."""
 

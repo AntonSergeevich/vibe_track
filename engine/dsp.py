@@ -253,7 +253,16 @@ def pan(x, position: float = 0.0):
     if arr.shape[0] == 1:
         arr = np.repeat(arr, 2, axis=0)
     angle = (np.clip(position, -1, 1) + 1) * np.pi / 4
-    return np.stack([arr[0] * np.cos(angle), arr[1] * np.sin(angle)]).astype(np.float32) * np.sqrt(2)
+    # Множители обязаны быть float32: numpy 2 повышает массив до float64 от
+    # любого float64-скаляра (np.sqrt(2) — именно такой), а на трёхминутном
+    # стерео это лишние 135 МБ на каждую дорожку. Пишем сразу в результат,
+    # без промежуточного np.stack — он делал ещё одну копию.
+    gain_l = np.float32(np.cos(angle) * np.sqrt(2.0))
+    gain_r = np.float32(np.sin(angle) * np.sqrt(2.0))
+    out = np.empty_like(arr)
+    np.multiply(arr[0], gain_l, out=out[0])
+    np.multiply(arr[1], gain_r, out=out[1])
+    return out
 
 
 def fade(x, sr: int = SR, fade_in_ms: float = 5.0, fade_out_ms: float = 30.0):

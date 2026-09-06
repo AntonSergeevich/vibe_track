@@ -11,7 +11,7 @@ from engine.analysis import analyze
 from engine.arrangement import parse_prompt
 from engine.audio_io import Audio, load, save
 from engine.chords import recognize, to_power_chords
-from engine.dsp import normalize_active_rms, pitch_shift, rms_db, sidechain_duck
+from engine.dsp import normalize_active_rms, pan, pitch_shift, rms_db, sidechain_duck
 from engine.mixing import build_gains, mixdown
 from engine.render import RenderOptions, add_vocal_take, transform
 from engine.rendering import render_arrangement
@@ -325,3 +325,40 @@ class TestChordSmoothing(EngineTestCase):
                   ChordEvent(2.1, 4.0, 0, "")]
         merged = _drop_short(events, min_duration=1.0)
         self.assertEqual([e.name for e in merged], ["Am", "C"])
+
+
+class DtypeTests(unittest.TestCase):
+    """Аудио живёт во float32.
+
+    Одного float64-скаляра хватает, чтобы numpy повысил весь массив: на
+    трёхминутном стерео это лишние 135 МБ на дорожку, и рендер падает с
+    нехваткой памяти уже у пользователя, а не в тестах.
+    """
+
+    def test_pan_keeps_float32(self):
+        mono = np.ones(4096, dtype=np.float32)
+        stereo = np.ones((2, 4096), dtype=np.float32)
+        for source in (mono, stereo):
+            for position in (-1.0, -0.4, 0.0, 0.4, 1.0):
+                out = pan(source, position)
+                self.assertEqual(out.dtype, np.float32,
+                                 f"панорама {position} повысила тип")
+                self.assertEqual(out.shape, (2, 4096))
+
+    def test_pan_is_equal_power(self):
+        stereo = np.ones((2, 128), dtype=np.float32)
+        for position in (-1.0, -0.5, 0.0, 0.5, 1.0):
+            out = pan(stereo, position)
+            power = float(out[0, 0] ** 2 + out[1, 0] ** 2)
+            self.assertAlmostEqual(power, 2.0, places=4,
+                                   msg=f"громкость гуляет при панораме {position}")
+
+    def test_effect_chain_stays_float32(self):
+        from engine.dsp import delay_fx, reverb, stereo_width
+
+        signal = np.repeat(np.sin(np.linspace(0, 200, 44100, dtype=np.float32))[None, :], 2, axis=0)
+        for name, fx in (("pan", lambda a: pan(a, -0.4)),
+                         ("stereo_width", lambda a: stereo_width(a, 1.15)),
+                         ("delay", lambda a: delay_fx(a, 44100, mix_amt=0.18)),
+                         ("reverb", lambda a: reverb(a, 44100, mix_amt=0.12))):
+            self.assertEqual(fx(signal).dtype, np.float32, name)
