@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import timedelta
 
 from django.conf import settings
 from django.contrib.auth import login
@@ -255,6 +256,36 @@ class TrackViewSet(viewsets.ModelViewSet):
                         status=status.HTTP_202_ACCEPTED)
 
 
+# Рендер обновляет прогресс на каждом этапе. Самый долгий из них — Demucs,
+# который на слабой машине идёт минут пять молча. Полчаса тишины означают,
+# что считать уже некому: поток умер вместе с процессом.
+STALLED_AFTER = timedelta(minutes=30)
+
+
+def _fail_if_stalled(job):
+    """Закрывает рендер, который перестал подавать признаки жизни.
+
+    Иначе браузер опрашивает статус вечно, а человек смотрит на застывшие
+    проценты и не знает, ждать ему или перезапускать.
+    """
+    if job.status != RenderJob.STATUS_RUNNING:
+        return job
+    if timezone.now() - job.updated_at < STALLED_AFTER:
+        return job
+
+    job.status = RenderJob.STATUS_ERROR
+    job.stage = 'error'
+    job.error = ('Обработка остановилась и не подаёт признаков жизни. '
+                 'Скорее всего, серверу не хватило памяти. Списание '
+                 'возвращено, трек можно запустить заново.')
+    job.save(update_fields=['status', 'stage', 'error', 'updated_at'])
+    owner = job.track.project.owner if job.track.project_id else None
+    if owner is not None:
+        billing_service.refund(owner, job, 'обработка зависла')
+        billing_service.refund_cover(owner, job, 'обработка зависла')
+    return job
+
+
 class RenderJobViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = RenderJobSerializer
     permission_classes = [permissions.AllowAny]
@@ -268,7 +299,7 @@ class RenderJobViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=['get'])
     def status(self, request, pk=None):
-        job = self.get_object()
+        job = _fail_if_stalled(self.get_object())
         return Response({'id': job.pk, 'status': job.status, 'stage': job.stage,
                          'progress': job.progress, 'error': job.error,
                          'warnings': job.warnings})

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 from unittest import mock
 
@@ -417,6 +418,67 @@ class MemoryErrorTests(TestCase):
         self.assertIn("покороче", job.error, "человеку нужен выход, а не диагноз")
         self.assertEqual(billing.used_this_period(user), 0, "списание вернули")
         self.assertEqual(billing.covers_used_this_period(user), 0)
+
+
+class StalledJobTests(TestCase):
+    """Оборванный рендер должен закрываться, а не висеть на 25% вечно."""
+
+    def setUp(self):
+        from .models import Project, Track, User
+
+        self.user = User.objects.create_user(username="bassist", password="pass12345")
+        self.project = Project.objects.create(owner=self.user, title="Мои треки")
+        self.track = Track.objects.create(project=self.project, title="Трек")
+
+    def _running_job(self, minutes_ago: int):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from . import billing
+
+        job = RenderJob.objects.create(track=self.track,
+                                       status=RenderJob.STATUS_RUNNING,
+                                       stage="separate", progress=25)
+        billing.charge(self.user, job)
+        RenderJob.objects.filter(pk=job.pk).update(
+            updated_at=timezone.now() - timedelta(minutes=minutes_ago))
+        return job
+
+    def test_long_silence_closes_the_job_and_returns_the_charge(self):
+        from . import billing
+
+        job = self._running_job(minutes_ago=45)
+        self.client.force_login(self.user)
+        data = self.client.get(f"/api/renders/{job.pk}/status/").json()
+
+        self.assertEqual(data["status"], "error")
+        self.assertIn("памяти", data["error"])
+        self.assertIn("заново", data["error"], "человеку нужен следующий шаг")
+        self.assertEqual(billing.used_this_period(self.user), 0)
+
+    def test_slow_render_is_not_touched(self):
+        """Demucs молчит минутами — это не повод объявлять его мёртвым."""
+        job = self._running_job(minutes_ago=4)
+        self.client.force_login(self.user)
+        data = self.client.get(f"/api/renders/{job.pk}/status/").json()
+        self.assertEqual(data["status"], RenderJob.STATUS_RUNNING)
+
+    def test_startup_closes_jobs_left_by_a_dead_process(self):
+        from django.apps import apps
+        from django.test import override_settings
+
+        from . import billing
+
+        job = self._running_job(minutes_ago=1)
+        with override_settings(VIBETRACK_INLINE_WORKER=True):
+            with mock.patch.object(sys, "argv", ["manage.py", "runserver"]):
+                apps.get_app_config("core")._recover_orphaned_jobs()
+
+        job.refresh_from_db()
+        self.assertEqual(job.status, RenderJob.STATUS_ERROR)
+        self.assertIn("перезапущен", job.error)
+        self.assertEqual(billing.used_this_period(self.user), 0)
 
 
 class CoverLimitTests(TestCase):

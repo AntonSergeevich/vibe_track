@@ -18,6 +18,7 @@ from . import SR
 from .audio_io import Audio, resample, save
 from .dsp import bandpass, highpass, lowpass
 from .models import ModelUnavailable, demucs_available, get_demucs
+from .system import enough_memory_for_demucs
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,14 @@ def separate(audio: Audio, model: str = "htdemucs",
     backend = prefer_backend or ("demucs" if demucs_available() else "dsp")
     if backend == "dsp" and prefer_backend != "dsp" and not demucs_available():
         reason = "пакет demucs не установлен"
+    if backend == "demucs":
+        # Нехватка памяти не бросает исключение: система убивает процесс
+        # целиком, и человек смотрит на застывший прогресс. Поэтому решаем
+        # заранее — лучше разделить хуже, чем не разделить вовсе.
+        enough, detail = enough_memory_for_demucs(audio.duration)
+        if not enough:
+            logger.warning("Demucs пропущен: %s", detail)
+            backend, reason = "dsp", f"не хватает памяти ({detail})"
     if backend == "demucs":
         try:
             result = _separate_demucs(audio, model)

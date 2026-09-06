@@ -327,6 +327,53 @@ class TestChordSmoothing(EngineTestCase):
         self.assertEqual([e.name for e in merged], ["Am", "C"])
 
 
+class MemoryGuardTests(unittest.TestCase):
+    """Проверка памяти перед Demucs: молчаливая смерть процесса недопустима."""
+
+    def test_short_track_passes_on_a_roomy_machine(self):
+        from unittest import mock
+
+        from engine import system
+
+        with mock.patch.object(system, "available_memory_mb", return_value=16000):
+            ok, detail = system.enough_memory_for_demucs(200)
+        self.assertTrue(ok)
+        self.assertEqual(detail, "")
+
+    def test_long_track_on_a_tight_machine_is_refused_with_numbers(self):
+        from unittest import mock
+
+        from engine import system
+
+        with mock.patch.object(system, "available_memory_mb", return_value=1500):
+            ok, detail = system.enough_memory_for_demucs(200)
+        self.assertFalse(ok)
+        self.assertIn("ГБ", detail, "человеку нужны цифры, а не «мало памяти»")
+
+    def test_unknown_memory_never_blocks(self):
+        from unittest import mock
+
+        from engine import system
+
+        with mock.patch.object(system, "available_memory_mb", return_value=None):
+            ok, _ = system.enough_memory_for_demucs(600)
+        self.assertTrue(ok, "не знать объём памяти — не повод отказывать")
+
+    def test_separation_falls_back_to_dsp_and_says_why(self):
+        from unittest import mock
+
+        from engine import separation
+        from engine.audio_io import Audio
+
+        audio = Audio(np.zeros((2, 44100 * 3), dtype=np.float32), 44100)
+        with mock.patch.object(separation, "enough_memory_for_demucs",
+                               return_value=(False, "свободно 1.0 ГБ, нужно 2.5 ГБ")), \
+             mock.patch.object(separation, "demucs_available", return_value=True):
+            result = separation.separate(audio)
+        self.assertEqual(result.backend, "dsp")
+        self.assertIn("памяти", result.detail)
+
+
 class SeparationMemoryTests(unittest.TestCase):
     """Маска центра считается блоками — результат обязан не измениться."""
 
