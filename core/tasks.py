@@ -132,6 +132,7 @@ def render_track(self, job_id: int) -> dict:
         job.save(update_fields=["status", "stage", "error", "updated_at"])
         # трек не получился — списание возвращаем, это наша ошибка, а не его
         billing.refund(job.track.project.owner, job, f"рендер упал: {exc}"[:200])
+        billing.refund_cover(job.track.project.owner, job, "рендер упал")
         return {"status": "error", "detail": str(exc)}
 
     _store_result(job, result)
@@ -156,6 +157,10 @@ def _store_result(job: RenderJob, result) -> None:
 
     job.track.analysis = result.analysis
     job.track.save(update_fields=["analysis"])
+
+    if (job.options or {}).get("generate_cover") and not result.cover_path:
+        # кавер заказали, но внешняя модель его не отдала — лимит возвращаем
+        billing.refund_cover(job.track.project.owner, job, "кавер не сгенерировался")
 
     job.stems.all().delete()
     if result.cover_path:

@@ -33,6 +33,7 @@
       <span>Использовано: <b>{{ billing.used }}</b></span>
       {% if billing.unlimited %}<span>Лимит: <b>без ограничений</b></span>
       {% else %}<span>Осталось: <b>{{ billing.remaining }}</b></span>{% endif %}
+      <span>Каверов у нейросети: <b>{{ billing.covers_remaining }}</b> из {{ billing.plan.covers }}</span>
       {% if subscription %}<span>Действует до: <b>{{ subscription.expires_at|date:"d.m.Y" }}</b></span>{% endif %}
     </div>
 

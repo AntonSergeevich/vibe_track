@@ -9,6 +9,31 @@ import os
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def load_env_file(path: Path) -> None:
+    """Подхватывает переменные из .env рядом с manage.py.
+
+    Без этого ключ API пришлось бы задавать в каждом новом окне терминала и
+    отдельно в конфигурации запуска PyCharm — и однажды он бы там не совпал.
+    Уже заданные переменные окружения имеют приоритет: на сервере настройки
+    приходят из окружения, а не из файла.
+    """
+    if not path.exists():
+        return
+    for raw in path.read_text(encoding="utf-8-sig").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip()
+        # значение до комментария, без кавычек: VIBETRACK_X=0.75  # подсказка
+        value = value.split(" #")[0].strip().strip('"').strip("'")
+        if name and name not in os.environ:
+            os.environ[name] = value
+
+
+load_env_file(BASE_DIR / ".env")
+
+
 def env_bool(name: str, default: bool = False) -> bool:
     return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes", "on")
 

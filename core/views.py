@@ -208,6 +208,7 @@ class TrackViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
 
+        wants_cover = bool(data['options'].get('generate_cover'))
         if request.user.is_authenticated:
             try:
                 plan = billing_service.check_quota(request.user)
@@ -216,15 +217,31 @@ class TrackViewSet(viewsets.ModelViewSet):
                     {'detail': str(exc), 'code': 'quota_exceeded',
                      'billing': billing_service.summary(request.user)},
                     status=status.HTTP_402_PAYMENT_REQUIRED)
+            if wants_cover:
+                # каждая генерация у внешней модели стоит живых денег,
+                # поэтому лимит на неё отдельный и строже лимита рендеров
+                try:
+                    billing_service.check_cover_quota(request.user)
+                except billing_service.CoverQuotaExceeded as exc:
+                    return Response(
+                        {'detail': str(exc), 'code': 'cover_quota_exceeded',
+                         'billing': billing_service.summary(request.user)},
+                        status=status.HTTP_402_PAYMENT_REQUIRED)
             # тариф решает, отдавать WAV или mp3 и звать ли Demucs
             data['options'] = {**billing_service.render_options_for(plan), **data['options']}
-        elif getattr(settings, 'VIBETRACK_REQUIRE_LOGIN', False):
-            return Response({'detail': 'Войдите, чтобы обрабатывать треки.'},
-                            status=status.HTTP_401_UNAUTHORIZED)
+        else:
+            if getattr(settings, 'VIBETRACK_REQUIRE_LOGIN', False):
+                return Response({'detail': 'Войдите, чтобы обрабатывать треки.'},
+                                status=status.HTTP_401_UNAUTHORIZED)
+            # анонимному кавер не отдаём: списать его не с кого
+            data['options']['generate_cover'] = False
+            wants_cover = False
 
         job = RenderJob.objects.create(track=track, prompt=data['prompt'],
                                        overrides=data['overrides'], options=data['options'])
         billing_service.charge(request.user, job, note=data['prompt'][:200])
+        if wants_cover:
+            billing_service.charge_cover(request.user, job, note=data['prompt'][:200])
         async_result = enqueue(render_track, job.pk)
         RenderJob.objects.filter(pk=job.pk).update(
             celery_task_id=getattr(async_result, 'id', '') or '')

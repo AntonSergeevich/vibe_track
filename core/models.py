@@ -209,7 +209,9 @@ class UsageRecord(models.Model):
 
     KIND_CHARGE = 'charge'
     KIND_REFUND = 'refund'
-    KIND_CHOICES = [(KIND_CHARGE, 'Списание'), (KIND_REFUND, 'Возврат')]
+    KIND_COVER = 'cover'
+    KIND_CHOICES = [(KIND_CHARGE, 'Списание'), (KIND_REFUND, 'Возврат'),
+                    (KIND_COVER, 'Генерация кавера')]
 
     user = models.ForeignKey('User', on_delete=models.CASCADE, related_name='usage')
     job = models.ForeignKey('RenderJob', on_delete=models.SET_NULL, null=True, blank=True,

@@ -75,7 +75,10 @@ def generate_cover(request: CoverRequest, session=None) -> CoverResult:
                                  "VIBETRACK_MUSIC_PROVIDER и VIBETRACK_MUSIC_API_KEY.")
     started = time.time()
     try:
-        audio = _http_generate(request, session=session)
+        if name == "stability":
+            audio = stability_generate(request, session=session)
+        else:
+            audio = _http_generate(request, session=session)
     except Exception as exc:  # noqa: BLE001 — внешний сервис не должен ронять рендер
         logger.warning("Генерация через %s не удалась: %s", name, exc)
         return CoverResult(provider=name, error=str(exc),
@@ -84,6 +87,95 @@ def generate_cover(request: CoverRequest, session=None) -> CoverResult:
                        cost_usd=COST_HINTS.get(name, COST_HINTS["custom"]),
                        seconds=round(time.time() - started, 2),
                        notes=[f"Кавер сгенерирован провайдером {name}"])
+
+
+# ------------------------------------------------------------- Stability AI
+STABILITY_URL = "https://api.stability.ai/v2beta/audio/stable-audio-2/audio-to-audio"
+
+
+def prepare_input(source_path: str, max_seconds: float, sr: int = 44100) -> str:
+    """Готовит вход для audio-to-audio: обрезка и выравнивание громкости.
+
+    Провайдер работает с короткими фрагментами и заметно лучше отвечает на
+    нормализованный по громкости материал, чем на сырой файл с диска.
+    """
+    import tempfile
+
+    from .audio_io import save
+    from .dsp import normalize_loudness
+
+    audio = load(source_path, sr=sr)
+    if audio.duration > max_seconds:
+        audio = Audio(audio.data[:, : int(max_seconds * audio.sr)], audio.sr)
+    audio = Audio(normalize_loudness(audio.data, -16.0, audio.sr), audio.sr)
+    path = tempfile.mktemp(suffix=".wav")
+    return save(path, audio)
+
+
+def stability_generate(request: CoverRequest, session=None) -> Audio:
+    """Stable Audio 2: превращает загруженный трек в другой стиль.
+
+    Эндпоинт синхронный — аудио приходит телом ответа, опрашивать нечего.
+    Поля запроса подтверждаются первым же реальным вызовом: при ошибке
+    Stability отвечает понятным JSON, который команда `check_music_api`
+    печатает целиком.
+    """
+    import requests
+
+    session = session or requests.Session()
+    url = os.getenv("VIBETRACK_STABILITY_URL", STABILITY_URL)
+    key = os.getenv("VIBETRACK_MUSIC_API_KEY", "")
+    max_seconds = float(os.getenv("VIBETRACK_STABILITY_MAX_SECONDS", "180"))
+    duration = int(min(request.duration or max_seconds, max_seconds))
+
+    prepared = prepare_input(request.source_path, max_seconds)
+    try:
+        with open(prepared, "rb") as fh:
+            response = session.post(
+                url,
+                headers={"Authorization": f"Bearer {key}", "Accept": "audio/*"},
+                files={"audio": fh},
+                data={
+                    "prompt": request.style_prompt,
+                    # 0.6-0.75 — ближе к оригиналу, 0.85-0.9 — сильнее переделка
+                    "strength": os.getenv("VIBETRACK_STABILITY_STRENGTH", "0.75"),
+                    "duration": duration,
+                    "output_format": os.getenv("VIBETRACK_STABILITY_FORMAT", "mp3"),
+                    "steps": os.getenv("VIBETRACK_STABILITY_STEPS", "8"),
+                },
+                timeout=int(os.getenv("VIBETRACK_STABILITY_TIMEOUT", "600")),
+            )
+    finally:
+        if os.path.exists(prepared):
+            os.remove(prepared)
+
+    if response.status_code != 200:
+        raise RuntimeError(f"Stability ответил {response.status_code}: "
+                           f"{_error_text(response)}")
+
+    import tempfile
+
+    suffix = ".mp3" if os.getenv("VIBETRACK_STABILITY_FORMAT", "mp3") == "mp3" else ".wav"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(response.content)
+        tmp_path = tmp.name
+    try:
+        return load(tmp_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+
+def _error_text(response) -> str:
+    """Текст ошибки провайдера в читаемом виде."""
+    try:
+        data = response.json()
+    except Exception:
+        return (getattr(response, "text", "") or str(response.content[:300]))[:500]
+    for key in ("errors", "message", "error", "name"):
+        if key in data:
+            return json.dumps(data[key], ensure_ascii=False)[:500]
+    return json.dumps(data, ensure_ascii=False)[:500]
 
 
 def _config() -> dict:

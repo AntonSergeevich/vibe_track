@@ -22,6 +22,7 @@ class PlanSpec:
     name: str
     price_rub: int
     tracks: int                  # сколько рендеров даёт тариф
+    covers: int = 0              # сколько из них — с генерацией у внешней модели
     recurring: bool = True       # False — разовая покупка
     wav_stems: bool = False      # дорожки в WAV, а не только mp3
     demucs: bool = True          # студийное разделение исходника
@@ -30,23 +31,42 @@ class PlanSpec:
     commercial: bool = False     # коммерческая лицензия на результат
 
 
+# Лимит каверов отдельный и намеренно жёсткий: каждая генерация у внешней
+# модели стоит около 17 ₽ живых денег. Без него подписчик «Студии» за 690 ₽
+# мог бы заказать 90 каверов на 1530 ₽ — и тариф ушёл бы в минус.
 PLANS: dict[str, PlanSpec] = {
-    "free": PlanSpec("free", "Проба", 0, 2, wav_stems=False, demucs=False,
+    "free": PlanSpec("free", "Проба", 0, 2, covers=0, wav_stems=False, demucs=False,
                      storage_days=7),
-    "single": PlanSpec("single", "Разовый трек", 190, 1, recurring=False,
+    "single": PlanSpec("single", "Разовый трек", 190, 1, covers=1, recurring=False,
                        wav_stems=True, storage_days=90, commercial=True),
-    "start": PlanSpec("start", "Старт", 390, 40, storage_days=60),
-    "studio": PlanSpec("studio", "Студия", 690, 90, wav_stems=True,
+    "start": PlanSpec("start", "Старт", 390, 40, covers=5, storage_days=60),
+    "studio": PlanSpec("studio", "Студия", 690, 90, covers=15, wav_stems=True,
                        priority=True, storage_days=90, commercial=True),
-    "pro": PlanSpec("pro", "Продакшн", 1690, 200, wav_stems=True, priority=True,
-                    storage_days=3650, commercial=True),
+    "pro": PlanSpec("pro", "Продакшн", 1690, 200, covers=40, wav_stems=True,
+                    priority=True, storage_days=3650, commercial=True),
 }
 # Тариф для владельца сервиса и тестировщиков: не продаётся, выдаётся правами
 PLANS["unlimited"] = PlanSpec("unlimited", "Безлимит (разработчик)", 0, 1_000_000,
-                              recurring=False, wav_stems=True, demucs=True,
-                              priority=True, storage_days=3650, commercial=True)
+                              covers=1_000, recurring=False, wav_stems=True,
+                              demucs=True, priority=True, storage_days=3650,
+                              commercial=True)
 
 DEFAULT_PLAN = "free"
+
+
+class CoverQuotaExceeded(Exception):
+    """Лимит генераций у внешней модели исчерпан — в отличие от разбора,
+    каждая такая генерация стоит живых денег."""
+
+    def __init__(self, plan: PlanSpec, used: int):
+        self.plan, self.used = plan, used
+        if plan.covers == 0:
+            message = (f"На тарифе «{plan.name}» генерация кавера недоступна. "
+                       "Разовый трек с кавером — 190 ₽.")
+        else:
+            message = (f"Каверы на тарифе «{plan.name}» закончились "
+                       f"({used} из {plan.covers}). Разбор треков по-прежнему доступен.")
+        super().__init__(message)
 
 
 class QuotaExceeded(Exception):
@@ -167,6 +187,36 @@ def check_quota(user) -> PlanSpec:
     return plan
 
 
+def covers_used_this_period(user) -> int:
+    from .models import UsageRecord
+
+    if not getattr(user, "is_authenticated", False):
+        return 0
+    return UsageRecord.objects.filter(
+        user=user, kind=UsageRecord.KIND_COVER,
+        created_at__gte=period_start(user)).count()
+
+
+def check_cover_quota(user) -> PlanSpec:
+    """Бросает CoverQuotaExceeded, если каверы на тарифе кончились."""
+    plan = plan_for(user)
+    used = covers_used_this_period(user)
+    if used >= plan.covers:
+        raise CoverQuotaExceeded(plan, used)
+    return plan
+
+
+def charge_cover(user, job, note: str = "") -> "object | None":
+    """Отмечает израсходованную генерацию у внешней модели."""
+    from .models import UsageRecord
+
+    if not getattr(user, "is_authenticated", False):
+        return None
+    return UsageRecord.objects.create(
+        user=user, job=job, kind=UsageRecord.KIND_COVER,
+        plan=plan_for(user).slug, note=note or "генерация кавера")
+
+
 def charge(user, job, note: str = "") -> "object | None":
     """Списывает один рендер при постановке задачи в очередь."""
     from .models import UsageRecord
@@ -193,6 +243,22 @@ def refund(user, job, reason: str) -> "object | None":
         plan=plan_for(user).slug, note=reason)
 
 
+def refund_cover(user, job, reason: str = "") -> int:
+    """Возвращает лимит кавера, если генерация не состоялась.
+
+    Каверы считаются по количеству записей, поэтому «возврат» — это удаление
+    записи, а не встречная проводка. Пользователь не должен платить лимитом
+    за кавер, которого нет.
+    """
+    from .models import UsageRecord
+
+    if not getattr(user, "is_authenticated", False):
+        return 0
+    deleted, _ = UsageRecord.objects.filter(
+        user=user, job=job, kind=UsageRecord.KIND_COVER).delete()
+    return deleted
+
+
 def render_options_for(plan: PlanSpec) -> dict:
     """Опции конвейера, вытекающие из тарифа."""
     return {
@@ -207,16 +273,18 @@ def summary(user) -> dict:
     used = used_this_period(user)
     return {
         "plan": {"slug": plan.slug, "name": plan.name, "price_rub": plan.price_rub,
-                 "tracks": plan.tracks, "wav_stems": plan.wav_stems,
+                 "tracks": plan.tracks, "covers": plan.covers, "wav_stems": plan.wav_stems,
                  "demucs": plan.demucs, "priority": plan.priority,
                  "storage_days": plan.storage_days, "commercial": plan.commercial},
         "used": used,
         "remaining": max(plan.tracks - used, 0),
+        "covers_used": covers_used_this_period(user),
+        "covers_remaining": max(plan.covers - covers_used_this_period(user), 0),
         "period_start": period_start(user) if getattr(user, "is_authenticated", False) else None,
         "period_end": period_end(user) if getattr(user, "is_authenticated", False) else None,
         "unlimited": plan.slug == "unlimited",
         "plans": [{"slug": p.slug, "name": p.name, "price_rub": p.price_rub,
-                   "tracks": p.tracks, "recurring": p.recurring,
+                   "tracks": p.tracks, "covers": p.covers, "recurring": p.recurring,
                    "wav_stems": p.wav_stems, "commercial": p.commercial}
                   for p in PLANS.values() if p.slug != "unlimited"],
     }

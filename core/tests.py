@@ -301,6 +301,129 @@ class BillingTests(TestCase):
 
 
 @override_settings(MEDIA_ROOT=MEDIA)
+class EnvFileTests(TestCase):
+    """Чтение .env: ключ задаётся один раз файлом, а не в каждом терминале."""
+
+    def _write(self, text: str):
+        import tempfile
+        from pathlib import Path
+
+        path = Path(tempfile.mkdtemp()) / ".env"
+        path.write_text(text, encoding="utf-8-sig")
+        return path
+
+    def test_reads_values_and_ignores_junk(self):
+        from vibetrack_site.settings import load_env_file
+
+        path = self._write(
+            "# комментарий\n"
+            "VIBETRACK_MUSIC_API_KEY=\"sk-test\"\n"
+            "VIBETRACK_STABILITY_STRENGTH=0.75  # ближе к оригиналу\n"
+            "СЛОМАННАЯ СТРОКА\n")
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VIBETRACK_MUSIC_API_KEY", None)
+            os.environ.pop("VIBETRACK_STABILITY_STRENGTH", None)
+            load_env_file(path)
+            self.assertEqual(os.environ["VIBETRACK_MUSIC_API_KEY"], "sk-test")
+            self.assertEqual(os.environ["VIBETRACK_STABILITY_STRENGTH"], "0.75",
+                             "комментарий в конце строки не должен попадать в значение")
+
+    def test_environment_wins_over_file(self):
+        """На сервере настройки приходят из окружения, файл их не перебивает."""
+        from vibetrack_site.settings import load_env_file
+
+        path = self._write("VIBETRACK_MUSIC_API_KEY=sk-from-file\n")
+        with mock.patch.dict(os.environ, {"VIBETRACK_MUSIC_API_KEY": "sk-real"}):
+            load_env_file(path)
+            self.assertEqual(os.environ["VIBETRACK_MUSIC_API_KEY"], "sk-real")
+
+    def test_missing_file_is_not_an_error(self):
+        from pathlib import Path
+
+        from vibetrack_site.settings import load_env_file
+
+        load_env_file(Path("/nonexistent/.env"))
+
+
+class CoverLimitTests(TestCase):
+    """Лимит генераций у внешней модели — он же защита от работы в минус."""
+
+    def setUp(self):
+        from .models import Project, Track, User
+
+        self.user = User.objects.create_user(username="singer", password="pass12345")
+        self.project = Project.objects.create(owner=self.user, title="Мои треки")
+        self.track = Track.objects.create(project=self.project, title="Трек")
+        AudioFile.objects.create(track=self.track, file="audio/x.wav",
+                                 kind=AudioFile.KIND_SOURCE, status="done")
+
+    def _job(self):
+        return RenderJob.objects.create(track=self.track, prompt="ню-метал")
+
+    def test_free_plan_cannot_order_cover(self):
+        self.client.force_login(self.user)
+        response = self.client.post(
+            f"/api/tracks/{self.track.pk}/transform/",
+            {"options": {"generate_cover": True}}, content_type="application/json")
+        self.assertEqual(response.status_code, 402)
+        self.assertEqual(response.json()["code"], "cover_quota_exceeded")
+        self.assertIn("190", response.json()["detail"],
+                      "отказ должен подсказывать, где кавер взять")
+
+    def test_covers_run_out_separately_from_tracks(self):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        from . import billing
+        from .models import Subscription
+
+        Subscription.objects.create(user=self.user, plan="start",
+                                    expires_at=timezone.now() + timedelta(days=30))
+        for _ in range(billing.PLANS["start"].covers):
+            billing.charge_cover(self.user, self._job())
+        with self.assertRaises(billing.CoverQuotaExceeded):
+            billing.check_cover_quota(self.user)
+        # рендеры при этом целы: кавер не съедает трек из тарифа
+        self.assertEqual(billing.remaining(self.user), 40)
+
+    def test_failed_cover_returns_the_limit(self):
+        from . import billing
+
+        job = self._job()
+        billing.charge_cover(self.user, job)
+        self.assertEqual(billing.covers_used_this_period(self.user), 1)
+        billing.refund_cover(self.user, job, "кавер не сгенерировался")
+        self.assertEqual(billing.covers_used_this_period(self.user), 0)
+
+    def test_anonymous_request_never_orders_a_cover(self):
+        """Списать кавер не с кого, поэтому опция молча выключается."""
+        from .models import User
+
+        User.objects.filter(pk=self.user.pk)  # пользователь не участвует
+        with mock.patch("core.views.enqueue", return_value=None) as enqueue:
+            response = self.client.post(
+                f"/api/tracks/{self.track.pk}/transform/",
+                {"options": {"generate_cover": True}}, content_type="application/json")
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(enqueue.called)
+        job = RenderJob.objects.get(track=self.track)
+        self.assertFalse(job.options.get("generate_cover"))
+
+    def test_every_sold_plan_stays_profitable_on_covers(self):
+        """Каверы тарифа не должны стоить дороже самого тарифа."""
+        from . import billing
+
+        cover_cost_rub = 20            # $0.20 по курсу с запасом
+        for plan in billing.PLANS.values():
+            if plan.slug in ("free", "unlimited"):
+                continue
+            self.assertLessEqual(plan.covers * cover_cost_rub, plan.price_rub,
+                                 f"тариф {plan.slug} уходит в минус на каверах")
+            self.assertLessEqual(plan.covers, plan.tracks,
+                                 f"у тарифа {plan.slug} каверов больше, чем рендеров")
+
+
 class CabinetTests(TestCase):
     """Личный кабинет и вход."""
 

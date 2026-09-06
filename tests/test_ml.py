@@ -566,3 +566,98 @@ class TestGeneration(unittest.TestCase):
         data = {"output": {"files": [{"url": "https://cdn/x.mp3"}]}}
         self.assertEqual(_dig(data, "output.files.0.url"), "https://cdn/x.mp3")
         self.assertIsNone(_dig(data, "output.missing.url"))
+
+
+class _FakeStabilitySession:
+    """Синхронный ответ Stability: аудио приходит телом, опрашивать нечего."""
+
+    def __init__(self, audio_bytes: bytes, status: int = 200, payload=None):
+        self.audio_bytes, self.status, self.payload = audio_bytes, status, payload
+        self.calls = []
+
+    def post(self, url, headers=None, files=None, data=None, timeout=None):
+        self.calls.append({"url": url, "headers": headers, "data": data,
+                           "files": list(files or {})})
+        if self.status != 200:
+            return _FakeHttpResponse(self.payload, content=b"", status=self.status)
+        return _FakeHttpResponse(content=self.audio_bytes, status=200)
+
+
+class TestStabilityProvider(unittest.TestCase):
+    """Адаптер Stable Audio: audio-to-audio одним синхронным запросом."""
+
+    @classmethod
+    def setUpClass(cls):
+        import tempfile
+
+        from engine.audio_io import save
+
+        cls.tmp = tempfile.mkdtemp(prefix="vibetrack-stability-")
+        rng = np.random.default_rng(5)
+        source = Audio((rng.standard_normal((2, 44100 * 6)) * 0.1).astype(np.float32))
+        cls.source_path = save(os.path.join(cls.tmp, "source.wav"), source)
+        with open(cls.source_path, "rb") as fh:
+            cls.audio_bytes = fh.read()
+
+    def _env(self, **extra):
+        env = {"VIBETRACK_MUSIC_PROVIDER": "stability",
+               "VIBETRACK_MUSIC_API_KEY": "sk-test",
+               "VIBETRACK_STABILITY_MAX_SECONDS": "4"}
+        env.update(extra)
+        return env
+
+    def test_request_shape(self):
+        from engine.generation import CoverRequest, generate_cover
+
+        session = _FakeStabilitySession(self.audio_bytes)
+        with mock.patch.dict(os.environ, self._env()):
+            result = generate_cover(
+                CoverRequest(self.source_path, "aggressive nu metal", duration=120),
+                session=session)
+
+        self.assertTrue(result.ok, result.error)
+        call = session.calls[0]
+        self.assertIn("stable-audio-2/audio-to-audio", call["url"])
+        self.assertEqual(call["headers"]["Authorization"], "Bearer sk-test")
+        self.assertEqual(call["headers"]["Accept"], "audio/*",
+                         "просим сразу аудио, иначе придёт base64 в JSON")
+        self.assertEqual(call["files"], ["audio"])
+        self.assertEqual(call["data"]["prompt"], "aggressive nu metal")
+        self.assertEqual(call["data"]["duration"], 4,
+                         "длительность ограничена лимитом провайдера")
+        self.assertIn("strength", call["data"])
+
+    def test_input_is_trimmed_and_normalised(self):
+        from engine.audio_io import load
+        from engine.dsp import rms_db
+        from engine.generation import prepare_input
+
+        prepared = prepare_input(self.source_path, max_seconds=2.0)
+        try:
+            audio = load(prepared)
+            self.assertAlmostEqual(audio.duration, 2.0, delta=0.05)
+            self.assertAlmostEqual(rms_db(audio.data), -16.0, delta=3.0)
+        finally:
+            os.remove(prepared)
+
+    def test_error_body_reaches_the_user(self):
+        from engine.generation import CoverRequest, generate_cover
+
+        session = _FakeStabilitySession(b"", status=402,
+                                        payload={"errors": ["insufficient credits"]})
+        with mock.patch.dict(os.environ, self._env()):
+            result = generate_cover(CoverRequest(self.source_path, "nu metal"),
+                                    session=session)
+
+        self.assertFalse(result.ok)
+        self.assertIn("402", result.error)
+        self.assertIn("insufficient credits", result.error,
+                      "текст провайдера должен доходить до пользователя целиком")
+
+    def test_strength_is_configurable(self):
+        from engine.generation import CoverRequest, generate_cover
+
+        session = _FakeStabilitySession(self.audio_bytes)
+        with mock.patch.dict(os.environ, self._env(VIBETRACK_STABILITY_STRENGTH="0.9")):
+            generate_cover(CoverRequest(self.source_path, "nu metal"), session=session)
+        self.assertEqual(session.calls[0]["data"]["strength"], "0.9")
