@@ -28,6 +28,12 @@ class Command(BaseCommand):
                             help="описание стиля; по умолчанию — тот же промпт, "
                                  "что уходит из студии")
         parser.add_argument("--strength", default="")
+        parser.add_argument("--sweep", default="",
+                            help="сравнить несколько значений силы за прогон, "
+                                 "например 0.35,0.5,0.65 — каждое стоит $0.20")
+        parser.add_argument("--instrumental", action="store_true",
+                            help="отправить минусовку без вокала: фильтр "
+                                 "авторских прав срабатывает реже")
         parser.add_argument("--out", default="cover_test.mp3")
 
     def handle(self, *args, **options):
@@ -60,9 +66,21 @@ class Command(BaseCommand):
         self.stdout.write(f"Промпт: {options['prompt']}")
         self.stdout.write("\nЗапрос пошёл…")
 
+        track_path = options["track"]
+        if options["instrumental"]:
+            track_path = self._instrumental(track_path)
+            self.stdout.write(f"Отправляем минусовку: {track_path}")
+
+        values = [v.strip() for v in options["sweep"].split(",") if v.strip()]
+        if values:
+            self.stdout.write(self.style.WARNING(
+                f"\nСравнение {len(values)} вариантов — это ${0.2 * len(values):.2f} "
+                f"({20 * len(values)} кредитов)."))
+            return self._sweep(track_path, options, values, seconds)
+
         started = time.time()
         result = generation.generate_cover(generation.CoverRequest(
-            source_path=options["track"], style_prompt=options["prompt"],
+            source_path=track_path, style_prompt=options["prompt"],
             duration=seconds))
         elapsed = time.time() - started
 
@@ -89,3 +107,45 @@ class Command(BaseCommand):
         self.stdout.write(f"Ориентировочная стоимость вызова: ${result.cost_usd:.2f}")
         self.stdout.write("\nПослушайте файл. Если звучит как нужный жанр — "
                           "включаем генерацию в студии галочкой «Заказать кавер».")
+
+    def _sweep(self, track_path, options, values, seconds):
+        """Гоняет один и тот же трек с разной силой переделки.
+
+        Слушать варианты подряд — единственный способ найти своё значение:
+        на слух разница между 0.35 и 0.5 больше, чем кажется по числам.
+        """
+        import time
+
+        for value in values:
+            os.environ["VIBETRACK_STABILITY_STRENGTH"] = value
+            self.stdout.write(f"\nСила переделки {value} …")
+            started = time.time()
+            result = generation.generate_cover(generation.CoverRequest(
+                source_path=track_path, style_prompt=options["prompt"],
+                duration=seconds))
+            if not result.ok:
+                self.stdout.write(self.style.ERROR(f"  не вышло: {result.error}"))
+                continue
+            name = f"cover_{value.replace('.', '_')}.mp3"
+            save(name, result.audio)
+            self.stdout.write(self.style.SUCCESS(
+                f"  {name} — {result.audio.duration:.0f} с за {time.time() - started:.0f} с"))
+
+        self.stdout.write("\nПослушайте файлы подряд и скажите, какой ближе. "
+                          "Победившее значение впишем в .env как основное.")
+
+    def _instrumental(self, track_path: str) -> str:
+        """Минусовка исходника: у модели не будет чужого голоса."""
+        import numpy as np
+
+        from engine.audio_io import Audio
+        from engine.separation import separate
+
+        self.stdout.write("Убираю вокал (это займёт минуту)…")
+        stems = separate(load(track_path)).stems
+        parts = [a.data for name, a in stems.items() if name != "vocals"]
+        width = max(p.shape[-1] for p in parts)
+        mix = np.zeros((2, width), dtype=np.float32)
+        for part in parts:
+            mix[:, : part.shape[-1]] += part
+        return save("cover_input.wav", Audio(mix, load(track_path).sr))

@@ -651,6 +651,51 @@ class TestStabilityProvider(unittest.TestCase):
         with mock.patch.dict(os.environ, {"VIBETRACK_STABILITY_MAX_SECONDS": "60"}):
             self.assertEqual(stability_limit(), 60.0, "вниз ограничивать можно")
 
+    def test_cover_input_is_the_backing_track_without_vocals(self):
+        """Модель должна получать минусовку: чужой голос она всё равно перепоёт."""
+        from engine.audio_io import Audio, load
+        from engine.render import _build_cover_input
+
+        rng = np.random.default_rng(7)
+        sr = 44100
+        stems = {
+            "vocals": Audio((rng.standard_normal((2, sr)) * 0.5).astype(np.float32), sr),
+            "drums": Audio(np.ones((2, sr), dtype=np.float32) * 0.1, sr),
+            "bass": Audio(np.ones((2, sr), dtype=np.float32) * 0.1, sr),
+        }
+        path = _build_cover_input(stems, self.tmp)
+        self.assertTrue(path)
+        made = load(path)
+        # вокал был шумом, минусовка — двумя постоянными уровнями: если бы
+        # вокал попал внутрь, дисперсия была бы заметно выше
+        self.assertLess(float(np.std(made.data)), 0.05, "в минусовку попал вокал")
+
+    def test_no_separation_means_no_special_input(self):
+        from engine.render import _build_cover_input
+
+        self.assertEqual(_build_cover_input({}, self.tmp), "")
+
+    def test_cover_is_mixed_with_the_original_voice(self):
+        from engine.audio_io import Audio
+        from engine.render import _cover_with_vocals
+
+        sr = 44100
+        cover = Audio(np.ones((2, sr * 2), dtype=np.float32) * 0.2, sr)
+        voice = Audio(np.ones((2, sr * 5), dtype=np.float32) * 0.2, sr)
+        mixed = _cover_with_vocals(cover, voice, -10.0)
+
+        self.assertIsNotNone(mixed)
+        self.assertEqual(mixed.n_samples, cover.n_samples,
+                         "равняемся по каверу: он короче трека")
+
+    def test_too_short_cover_is_not_mixed(self):
+        from engine.audio_io import Audio
+        from engine.render import _cover_with_vocals
+
+        tiny = Audio(np.ones((2, 100), dtype=np.float32), 44100)
+        voice = Audio(np.ones((2, 44100), dtype=np.float32), 44100)
+        self.assertIsNone(_cover_with_vocals(tiny, voice, -10.0))
+
     def test_copyright_refusal_is_explained_to_a_human(self):
         """422 — фильтр авторских прав, а не поломка. Человеку нужен выход."""
         from engine.generation import CoverRequest, generate_cover

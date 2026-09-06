@@ -12,16 +12,19 @@ import os
 import time
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from . import SR
 from .analysis import TrackAnalysis, analyze
 from .arrangement import ArrangementSpec, parse_prompt
 from .llm import refine as llm_refine
-from .audio_io import Audio, load, save
+from .audio_io import Audio, load, resample, save
 from .chords import ChordEvent, recognize, to_power_chords, transpose as transpose_chords
 from .generation import (CoverRequest, generate_cover, is_configured as generation_configured,
                          stability_limit, style_prompt_for)
 from . import models
 from .mixing import MixSettings, build_gains, mixdown, stem_report
+from .dsp import normalize_loudness
 from .rendering import render_arrangement
 from .sampler import SampleLibrary, load_library, library_dir
 from .separation import separate
@@ -132,6 +135,7 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
 
     _progress("separate", 25)
     source_stems: dict[str, Audio] = {}
+    cover_input_path = ""
     if options.separate_source:
         backend = options.separation_backend
         result = separate(source, model=options.demucs_model,
@@ -156,6 +160,12 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
         # только вокал (текст и его переработка), а остальные три — это ещё
         # четверть гигабайта на трёхминутном треке, лежащая мёртвым грузом
         # до самого экспорта.
+        # Кавер лучше делать с минусовки, а не с полного микса: у модели нет
+        # чужого вокала, который она всё равно перепоёт по-своему, а фильтр
+        # авторских прав реже узнаёт песню без голоса.
+        if options.generate_cover:
+            cover_input_path = _build_cover_input(source_stems, stems_dir)
+
         for name in list(source_stems):
             stem_paths[f"source_{name}"] = save(
                 os.path.join(stems_dir, f"source_{name}.{ext}"), source_stems[name])
@@ -243,15 +253,29 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
                     f"Кавер сделан на первые {int(limit) // 60}:{int(limit) % 60:02d} — "
                     "модель не принимает треки длиннее. Разбор при этом по всему треку.")
             cover = generate_cover(CoverRequest(
-                source_path=source_path,
+                source_path=cover_input_path or source_path,
                 style_prompt=style_prompt_for(spec.genre, " ".join(spec.notes)),
                 genre=spec.genre, duration=analysis.duration))
             if cover.ok:
                 cover_path = save(os.path.join(out_dir, f"cover.{ext}"), cover.audio)
                 cover_cost = cover.cost_usd
                 logger.info("Кавер от %s за %.0f с", cover.provider, cover.seconds)
+                # Свой голос поверх нового аккомпанемента — то, ради чего
+                # человек и приносил трек: мелодия и слова остаются его.
+                if options.keep_original_vocals and "vocals" in source_stems:
+                    voiced = _cover_with_vocals(cover.audio, source_stems["vocals"],
+                                                options.master_loudness_db)
+                    if voiced is not None:
+                        stem_paths["cover_vocals"] = save(
+                            os.path.join(out_dir, f"cover_with_vocals.{ext}"), voiced)
+                        warnings.append(
+                            "Кавер сведён и с вашим голосом — файл «Кавер с вашим "
+                            "вокалом». Если голос разъезжается с музыкой, "
+                            "уменьшите VIBETRACK_STABILITY_STRENGTH.")
             else:
                 warnings.append(f"Кавер не получился: {cover.error}")
+            if cover_input_path and os.path.exists(cover_input_path):
+                os.remove(cover_input_path)
 
     result = RenderResult(
         out_dir=out_dir, master_path=master_path, cover_path=cover_path,
@@ -266,6 +290,41 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
     _write_score_files(out_dir, result)
     _progress("done", 100)
     return result
+
+
+def _build_cover_input(source_stems: dict, stems_dir: str) -> str:
+    """Минусовка для внешней модели: всё, кроме вокала.
+
+    Пустая строка — если разделения нет и брать нечего; тогда уйдёт полный
+    микс, как раньше.
+    """
+    parts = [audio.data for name, audio in source_stems.items() if name != "vocals"]
+    if not parts:
+        return ""
+    width = max(part.shape[-1] for part in parts)
+    mix = np.zeros((2, width), dtype=np.float32)
+    for part in parts:
+        stereo = part if part.shape[0] == 2 else np.repeat(part[:1], 2, axis=0)
+        mix[:, : stereo.shape[-1]] += stereo
+    mix = normalize_loudness(mix, -16.0, SR)
+    return save(os.path.join(stems_dir, "_cover_input.wav"), Audio(mix, SR))
+
+
+def _cover_with_vocals(cover: Audio, vocals: Audio, loudness_db: float) -> "Audio | None":
+    """Сводит сгенерированный аккомпанемент с исходным голосом.
+
+    Кавер обычно короче трека (модель принимает ограниченный кусок), поэтому
+    равняемся по нему: лучше короткий кусок с узнаваемым голосом, чем
+    длинный без него.
+    """
+    voice = vocals.stereo()
+    if voice.sr != cover.sr:
+        voice = resample(voice, cover.sr)
+    n = min(cover.n_samples, voice.n_samples)
+    if n < cover.sr:                       # меньше секунды — сводить нечего
+        return None
+    mixed = cover.data[:, :n] * 0.85 + voice.data[:, :n] * 1.1
+    return Audio(normalize_loudness(mixed, loudness_db, cover.sr), cover.sr)
 
 
 def _rework_source_vocals(vocals: Audio, spec: ArrangementSpec,

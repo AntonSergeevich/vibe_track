@@ -71,6 +71,7 @@ STEM_LABELS = {
     "vocals_female": "Вокал (жен.)",
     "vocals_harmony": "Гармония",
     "source": "Исходник (подложка)",
+    "cover_vocals": "Кавер с вашим вокалом",
 }
 
 
