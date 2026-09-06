@@ -49,7 +49,7 @@ class Command(BaseCommand):
         source = load(options["track"])
         # цена не зависит от длины, поэтому по умолчанию слушаем весь трек:
         # на двадцати секундах не видно ни куплета, ни припева
-        limit = float(os.getenv("VIBETRACK_STABILITY_MAX_SECONDS", "180"))
+        limit = generation.stability_limit()
         seconds = min(options["seconds"] or source.duration, limit)
         os.environ["VIBETRACK_STABILITY_MAX_SECONDS"] = str(seconds)
 

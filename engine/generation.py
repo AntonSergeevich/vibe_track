@@ -91,6 +91,14 @@ def generate_cover(request: CoverRequest, session=None) -> CoverResult:
 
 # ------------------------------------------------------------- Stability AI
 STABILITY_URL = "https://api.stability.ai/v2beta/audio/stable-audio-2/audio-to-audio"
+# Жёсткий предел модели: 190 секунд. Больше она не принимает вообще, поэтому
+# длинный трек приходится обрезать — и честно об этом предупреждать.
+STABILITY_MAX_SECONDS = 190.0
+
+
+def stability_limit() -> float:
+    return min(float(os.getenv("VIBETRACK_STABILITY_MAX_SECONDS", STABILITY_MAX_SECONDS)),
+               STABILITY_MAX_SECONDS)
 
 
 def prepare_input(source_path: str, max_seconds: float, sr: int = 44100) -> str:
@@ -125,7 +133,7 @@ def stability_generate(request: CoverRequest, session=None) -> Audio:
     session = session or requests.Session()
     url = os.getenv("VIBETRACK_STABILITY_URL", STABILITY_URL)
     key = os.getenv("VIBETRACK_MUSIC_API_KEY", "")
-    max_seconds = float(os.getenv("VIBETRACK_STABILITY_MAX_SECONDS", "180"))
+    max_seconds = stability_limit()
     duration = int(min(request.duration or max_seconds, max_seconds))
 
     prepared = prepare_input(request.source_path, max_seconds)

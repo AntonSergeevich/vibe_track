@@ -642,6 +642,15 @@ class TestStabilityProvider(unittest.TestCase):
             self.assertIn("quiet intro stays quiet", prompt,
                           "тихое вступление не должно превращаться в риф")
 
+    def test_limit_never_exceeds_what_the_model_accepts(self):
+        """190 секунд — жёсткий предел модели, настройкой его не поднять."""
+        from engine.generation import STABILITY_MAX_SECONDS, stability_limit
+
+        with mock.patch.dict(os.environ, {"VIBETRACK_STABILITY_MAX_SECONDS": "600"}):
+            self.assertEqual(stability_limit(), STABILITY_MAX_SECONDS)
+        with mock.patch.dict(os.environ, {"VIBETRACK_STABILITY_MAX_SECONDS": "60"}):
+            self.assertEqual(stability_limit(), 60.0, "вниз ограничивать можно")
+
     def test_steps_stay_inside_the_accepted_range(self):
         """stable-audio-2 принимает steps только 30-100.
 

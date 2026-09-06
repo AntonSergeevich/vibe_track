@@ -18,7 +18,8 @@ from .arrangement import ArrangementSpec, parse_prompt
 from .llm import refine as llm_refine
 from .audio_io import Audio, load, save
 from .chords import ChordEvent, recognize, to_power_chords, transpose as transpose_chords
-from .generation import CoverRequest, generate_cover, is_configured as generation_configured, style_prompt_for
+from .generation import (CoverRequest, generate_cover, is_configured as generation_configured,
+                         stability_limit, style_prompt_for)
 from .mixing import MixSettings, build_gains, mixdown, stem_report
 from .rendering import render_arrangement
 from .sampler import SampleLibrary, load_library, library_dir
@@ -213,6 +214,12 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
                             "(VIBETRACK_MUSIC_PROVIDER и ключ).")
         else:
             _progress("cover", 97)
+            limit = stability_limit()
+            if analysis.duration > limit:
+                # модель обрежет сама и молча — пусть человек узнает от нас
+                warnings.append(
+                    f"Кавер сделан на первые {int(limit) // 60}:{int(limit) % 60:02d} — "
+                    "модель не принимает треки длиннее. Разбор при этом по всему треку.")
             cover = generate_cover(CoverRequest(
                 source_path=source_path,
                 style_prompt=style_prompt_for(spec.genre, " ".join(spec.notes)),
