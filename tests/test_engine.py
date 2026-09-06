@@ -327,6 +327,60 @@ class TestChordSmoothing(EngineTestCase):
         self.assertEqual([e.name for e in merged], ["Am", "C"])
 
 
+class SeparationMemoryTests(unittest.TestCase):
+    """Маска центра считается блоками — результат обязан не измениться."""
+
+    def test_blocked_mask_matches_whole_track_math(self):
+        from engine.separation import _spectral_center_mask
+
+        rng = np.random.default_rng(3)
+        left = (rng.standard_normal(44100 * 3) * 0.2).astype(np.float32)
+        right = (left * 0.8 + rng.standard_normal(44100 * 3) * 0.05).astype(np.float32)
+
+        whole = _spectral_center_mask(left, right, 44100, block=10 ** 6)
+        blocked = _spectral_center_mask(left, right, 44100, block=16)
+        self.assertEqual(whole.shape, blocked.shape)
+        # расхождение только на уровне шума самого БПФ (порядок 1e-7):
+        # значения маски лежат в 0..1, слышать там нечего
+        self.assertLess(float(np.max(np.abs(whole - blocked))), 1e-6,
+                        "разбиение на блоки изменило маску")
+        self.assertEqual(blocked.dtype, np.float32)
+
+    def test_hpss_blocks_do_not_change_the_result(self):
+        from engine.separation import hpss
+
+        rng = np.random.default_rng(11)
+        y = (rng.standard_normal(44100 * 2) * 0.15).astype(np.float32)
+        y += (np.sin(np.linspace(0, 3000, y.size)) * 0.3).astype(np.float32)
+
+        whole_h, whole_p = hpss(y, 44100, block=10 ** 6)
+        blocked_h, blocked_p = hpss(y, 44100, block=32)
+        for name, a, b in (("гармоника", whole_h, blocked_h),
+                           ("перкуссия", whole_p, blocked_p)):
+            self.assertLess(float(np.max(np.abs(a - b))), 1e-5, name)
+
+    def test_hpss_separates_tone_from_clicks(self):
+        """Смысл разделения: тон уходит в гармонику, щелчки — в перкуссию."""
+        from engine.dsp import rms_db
+        from engine.separation import hpss
+
+        sr = 44100
+        t = np.arange(sr * 2) / sr
+        tone = np.sin(2 * np.pi * 440 * t).astype(np.float32) * 0.4
+        clicks = np.zeros_like(tone)
+        clicks[::sr // 4] = 1.0
+        harmonic, percussive = hpss(tone + clicks, sr)
+        self.assertGreater(rms_db(harmonic), rms_db(percussive) + 6.0,
+                           "тон должен остаться в гармонической части")
+
+    def test_mask_survives_track_shorter_than_window(self):
+        from engine.separation import _spectral_center_mask
+
+        short = np.ones(1000, dtype=np.float32)
+        mask = _spectral_center_mask(short, short, 44100)
+        self.assertEqual(mask.shape[0], 1, "короткий трек — ровно один кадр")
+
+
 class DtypeTests(unittest.TestCase):
     """Аудио живёт во float32.
 

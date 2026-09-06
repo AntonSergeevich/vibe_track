@@ -75,14 +75,25 @@ class TrackAnalysis:
         }
 
 
-def stft_mag(y: np.ndarray, n_fft: int = 2048, hop: int = 512) -> np.ndarray:
+def stft_mag(y: np.ndarray, n_fft: int = 2048, hop: int = 512,
+             block: int = 256) -> np.ndarray:
+    """Модули спектра по кадрам, блоками.
+
+    Спектр целого трека numpy считает в двойной точности: на трёх минутах
+    это несколько сотен мегабайт временных массивов ради матрицы float32,
+    которая нужна на выходе. Блоками результат тот же, память — от блока.
+    """
     if len(y) < n_fft:
         y = np.pad(y, (0, n_fft - len(y)))
     window = np.hanning(n_fft).astype(np.float32)
     n_frames = 1 + (len(y) - n_fft) // hop
-    idx = np.arange(n_fft)[None, :] + hop * np.arange(n_frames)[:, None]
-    frames = y[idx] * window
-    return np.abs(np.fft.rfft(frames, axis=1)).astype(np.float32)
+    offsets = np.arange(n_fft)[None, :]
+    mag = np.empty((n_frames, n_fft // 2 + 1), dtype=np.float32)
+    for start in range(0, n_frames, block):
+        stop = min(start + block, n_frames)
+        idx = offsets + hop * np.arange(start, stop)[:, None]
+        mag[start:stop] = np.abs(np.fft.rfft(y[idx] * window, axis=1))
+    return mag
 
 
 def onset_envelope(y: np.ndarray, sr: int = SR, hop: int = 512) -> np.ndarray:

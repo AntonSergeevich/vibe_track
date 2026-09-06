@@ -20,6 +20,7 @@ from .audio_io import Audio, load, save
 from .chords import ChordEvent, recognize, to_power_chords, transpose as transpose_chords
 from .generation import (CoverRequest, generate_cover, is_configured as generation_configured,
                          stability_limit, style_prompt_for)
+from . import models
 from .mixing import MixSettings, build_gains, mixdown, stem_report
 from .rendering import render_arrangement
 from .sampler import SampleLibrary, load_library, library_dir
@@ -112,6 +113,11 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
             except Exception:  # прогресс не должен ронять рендер
                 logger.debug("progress callback failed", exc_info=True)
 
+    ext = options.export_format
+    stems_dir = os.path.join(out_dir, "stems")
+    os.makedirs(stems_dir, exist_ok=True)
+    stem_paths: dict[str, str] = {}
+
     _progress("load", 2)
     source = load(source_path, sr=SR)
     if source.duration > options.max_duration:
@@ -140,6 +146,21 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
         else:
             logger.info("Demucs %s: %s дорожек за %.1f с", result.model,
                         len(result.stems), result.seconds)
+        del result
+        if not models.keep_loaded():
+            # Demucs своё отработал: дальше идут Whisper и синтез, и держать
+            # рядом с ними ещё и torch-модель типичной машине не по силам
+            models.release("demucs:")
+
+        # Разобранные дорожки сразу уходят на диск: в памяти дальше нужен
+        # только вокал (текст и его переработка), а остальные три — это ещё
+        # четверть гигабайта на трёхминутном треке, лежащая мёртвым грузом
+        # до самого экспорта.
+        for name in list(source_stems):
+            stem_paths[f"source_{name}"] = save(
+                os.path.join(stems_dir, f"source_{name}.{ext}"), source_stems[name])
+            if name != "vocals":
+                source_stems.pop(name)
     timer.mark("separate")
 
     _progress("transcribe", 40)
@@ -152,6 +173,8 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
         if lyrics.backend == "unavailable":
             warnings.append("Whisper не установлен — текст не расшифрован. "
                             "Можно вставить текст вручную, аккорды к нему подставятся.")
+        if not models.keep_loaded():
+            models.release("whisper:")
     timer.mark("transcribe")
 
     _progress("arrange", 50)
@@ -190,6 +213,8 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
         settings.gains_db["source"] = options.blend_source_db
     # consume=True: дорожки освобождаются по мере сведения, дальше они не нужны
     master, processed = mixdown(stems, settings, sr=SR, consume=True)
+    # отчёт снимаем сразу: на экспорте дорожки уходят на диск и освобождаются
+    report = stem_report(processed)
     timer.mark("mix")
 
     _progress("score", 92)
@@ -198,13 +223,10 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
     timer.mark("score")
 
     _progress("export", 95)
-    stems_dir = os.path.join(out_dir, "stems")
-    os.makedirs(stems_dir, exist_ok=True)
-    ext = options.export_format
-    stem_paths = {name: save(os.path.join(stems_dir, f"{name}.{ext}"), audio)
-                  for name, audio in processed.items()}
-    for name, audio in source_stems.items():
-        stem_paths[f"source_{name}"] = save(os.path.join(stems_dir, f"source_{name}.{ext}"), audio)
+    # исходные дорожки уже на диске — сохраняем только то, что насчитали сами
+    for name in list(processed):
+        stem_paths[name] = save(os.path.join(stems_dir, f"{name}.{ext}"),
+                                processed.pop(name))
     master_path = save(os.path.join(out_dir, f"master.{ext}"), master)
 
     cover_path, cover_cost = "", 0.0
@@ -237,7 +259,7 @@ def transform(source_path: str, prompt: str = "", overrides: dict | None = None,
         analysis=analysis.to_dict(), spec=spec.to_dict(), arrangement=arrangement.to_dict(),
         chords=[c.to_dict() for c in chords], lyrics=lyrics.to_dict(), lyric_sheet=sheet,
         chord_chart=chord_chart(chords), tabs=tabs,
-        report=stem_report(processed), warnings=warnings,
+        report=report, warnings=warnings,
     )
     timer.mark("export")
     result.timings = timer.marks

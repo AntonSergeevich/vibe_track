@@ -23,7 +23,7 @@
       <a class="chip" href="{% url 'register' %}">Регистрация</a>
     {% endif %}
   </div>
-  <p class="tagline" id="backends">Загрузи трек — получи новую версию с дорожками, аккордами и табами</p>
+  <p class="tagline">Загрузи трек — получи новую версию с дорожками, аккордами и табами</p>
 </header>
 
 <main>
@@ -124,8 +124,6 @@
 
       <label class="pill" style="margin-bottom:12px"><input type="checkbox" id="want-cover">
         Заказать кавер у внешней нейросети</label>
-      <p class="hint" style="margin-bottom:12px">Кавер приходит готовым миксом: дорожек и
-        табулатуры из него не извлечь, поэтому он идёт рядом с разбором, а не вместо него.</p>
 
       <label>Текст песни вручную — если распознавание недоступно
         <textarea id="manual-lyrics" rows="4" placeholder="Строка за строкой…"></textarea>
@@ -152,8 +150,6 @@
 
     <div id="cover-box" class="hidden">
       <h3>Кавер от нейросети</h3>
-      <p class="hint">Готовый микс в выбранном стиле. Дорожек и табов из него не
-        извлечь — они ниже, из нашего разбора.</p>
       <div class="master">
         <audio id="cover" controls preload="metadata"></audio>
         <a id="cover-dl" class="btn small" download>Скачать</a>

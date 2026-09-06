@@ -220,6 +220,52 @@ def clear() -> None:
     with _LOCK:
         _CACHE.clear()
         _LOAD_TIMES.clear()
+    _collect()
+
+
+def release(prefix: str) -> int:
+    """Выгружает модели, чьи ключи начинаются с prefix. Возвращает счётчик.
+
+    Долгоживущий воркер держит модели ради скорости, но на одной машине с
+    восемью гигабайтами Demucs и Whisper занимают память до самого конца
+    рендера — а дальше идёт синтез инструментов, которому её и не хватает.
+    Когда модель отработала, её дешевле выгрузить и загрузить снова из
+    локального кэша (секунды), чем не досчитать трек.
+    """
+    with _LOCK:
+        keys = [k for k in _CACHE if k.startswith(prefix)]
+        for key in keys:
+            _CACHE.pop(key, None)
+            _LOAD_TIMES.pop(key, None)
+    if keys:
+        _collect()
+        logger.info("Модели выгружены: %s", ", ".join(keys))
+    return len(keys)
+
+
+def keep_loaded() -> bool:
+    """Держать ли модели в памяти после использования.
+
+    По умолчанию — нет: типичная машина пользователя не тянет всё сразу.
+    На сервере с прогревом (VIBETRACK_PRELOAD_MODELS) выгружать нельзя,
+    иначе прогрев теряет смысл.
+    """
+    if os.getenv("VIBETRACK_PRELOAD_MODELS", "0").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    return os.getenv("VIBETRACK_KEEP_MODELS", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _collect() -> None:
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():        # pragma: no cover - на CPU не нужно
+            torch.cuda.empty_cache()
+    except Exception:                        # torch может быть не установлен
+        pass
 
 
 def _float_env(name: str) -> float | None:

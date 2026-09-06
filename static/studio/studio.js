@@ -78,15 +78,8 @@
     return data;
   }
 
-  /* --------------------------------------------------------- возможности */
-  request('capabilities/').then((caps) => {
-    const b = caps.backends || {};
-    const state_of = (info, on, off) => (info && info.available ? `${on}: ${info.model}` : off);
-    $('#backends').innerHTML = [
-      `Дорожки: <b>${state_of(b.demucs, 'Demucs', 'DSP (базовое)')}</b>`,
-      `Текст: <b>${state_of(b.whisper, 'Whisper', 'вручную')}</b>`,
-    ].join(' · ');
-  }).catch(() => {});
+  /* Названия моделей в шапке пользователю ничего не говорят: он пришёл за
+     треком, а не за списком библиотек. Обещание результата полезнее. */
 
   /* ------------------------------------------------ загрузка с прогрессом */
   const dropzone = $('#dropzone');

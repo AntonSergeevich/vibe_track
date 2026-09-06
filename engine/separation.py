@@ -136,22 +136,36 @@ def _separate_dsp(audio: Audio) -> SeparationResult:
 
 
 def _spectral_center_mask(left: np.ndarray, right: np.ndarray, sr: int,
-                          n_fft: int = 4096, hop: int = 1024) -> np.ndarray:
-    """Маска «насколько бин сцентрирован» — грубый, но рабочий вокал-детектор."""
-    def _stft(x):
-        if len(x) < n_fft:
-            x = np.pad(x, (0, n_fft - len(x)))
-        window = np.hanning(n_fft).astype(np.float32)
-        n_frames = 1 + (len(x) - n_fft) // hop
-        idx = np.arange(n_fft)[None, :] + hop * np.arange(n_frames)[:, None]
-        return np.fft.rfft(x[idx] * window, axis=1)
+                          n_fft: int = 4096, hop: int = 1024,
+                          block: int = 128) -> np.ndarray:
+    """Маска «насколько бин сцентрирован» — грубый, но рабочий вокал-детектор.
 
-    L, R = _stft(left), _stft(right)
-    num = np.abs(L * np.conj(R))
-    den = np.maximum(np.abs(L) * np.abs(R), 1e-9)
-    coherence = np.clip(num / den, 0, 1)
-    balance = 1.0 - np.abs(np.abs(L) - np.abs(R)) / np.maximum(np.abs(L) + np.abs(R), 1e-9)
-    return (coherence * balance).astype(np.float32)
+    Считается блоками кадров. Спектр целого трека — это комплексная матрица
+    двойной точности на каждый канал: на трёх минутах выходило больше
+    полугигабайта временных массивов, и весь пик памяти рендера создавала
+    именно эта функция. Блоками результат тот же, а память — от размера
+    блока, а не от длины трека.
+    """
+    window = np.hanning(n_fft).astype(np.float32)
+    if len(left) < n_fft:
+        left = np.pad(left, (0, n_fft - len(left)))
+        right = np.pad(right, (0, n_fft - len(right)))
+    n_frames = 1 + (len(left) - n_fft) // hop
+    mask = np.empty((n_frames, n_fft // 2 + 1), dtype=np.float32)
+    offsets = np.arange(n_fft)[None, :]
+
+    for start in range(0, n_frames, block):
+        stop = min(start + block, n_frames)
+        idx = offsets + hop * np.arange(start, stop)[:, None]
+        spec_l = np.fft.rfft(left[idx] * window, axis=1)
+        spec_r = np.fft.rfft(right[idx] * window, axis=1)
+        abs_l, abs_r = np.abs(spec_l), np.abs(spec_r)
+        num = np.abs(spec_l * np.conj(spec_r))
+        den = np.maximum(abs_l * abs_r, 1e-9)
+        coherence = np.clip(num / den, 0, 1)
+        balance = 1.0 - np.abs(abs_l - abs_r) / np.maximum(abs_l + abs_r, 1e-9)
+        mask[start:stop] = (coherence * balance).astype(np.float32)
+    return mask
 
 
 def _apply_mask(x: np.ndarray, mask: np.ndarray, sr: int, n_fft: int = 4096, hop: int = 1024) -> np.ndarray:
@@ -176,31 +190,54 @@ def _safe_win_sum(win_sum: np.ndarray) -> np.ndarray:
 
 
 def hpss(y: np.ndarray, sr: int = SR, n_fft: int = 2048, hop: int = 512,
-         kernel: int = 17) -> tuple[np.ndarray, np.ndarray]:
-    """Гармонико-перкуссионное разделение медианной фильтрацией спектрограммы."""
+         kernel: int = 17, block: int = 256) -> tuple[np.ndarray, np.ndarray]:
+    """Гармонико-перкуссионное разделение медианной фильтрацией спектрограммы.
+
+    Считается блоками кадров и в одинарной точности. Раньше здесь разом
+    жили спектр трека в complex128, его модуль, две медианы, две маски и
+    полная матрица обратного БПФ — на трёх минутах больше гигабайта, весь
+    пик памяти рендера. Слышимой разницы нет: аудио и так float32.
+    """
     window = np.hanning(n_fft).astype(np.float32)
     padded = np.pad(y, (0, n_fft))
     n_frames = 1 + (len(padded) - n_fft) // hop
-    idx = np.arange(n_fft)[None, :] + hop * np.arange(n_frames)[:, None]
-    spec = np.fft.rfft(padded[idx] * window, axis=1)
-    mag = np.abs(spec)
+    offsets = np.arange(n_fft)[None, :]
 
+    spec = np.empty((n_frames, n_fft // 2 + 1), dtype=np.complex64)
+    for start in range(0, n_frames, block):
+        stop = min(start + block, n_frames)
+        idx = offsets + hop * np.arange(start, stop)[:, None]
+        spec[start:stop] = np.fft.rfft(padded[idx] * window, axis=1)
+
+    mag = np.abs(spec)                              # float32
     harm = _median_filter_1d(mag, kernel, axis=0)   # медиана по времени
     perc = _median_filter_1d(mag, kernel, axis=1)   # медиана по частоте
-    total = np.maximum(harm ** 2 + perc ** 2, 1e-12)
-    mask_h = harm ** 2 / total
-    mask_p = perc ** 2 / total
+    del mag
+    total = np.maximum(harm * harm + perc * perc, 1e-12)
+    mask_h = (harm * harm / total).astype(np.float32)
+    del harm
+    mask_p = (perc * perc / total).astype(np.float32)
+    del perc, total
 
-    def _istft(masked_spec):
+    # сумма окон одна на оба прохода — она зависит только от сетки кадров
+    win_sum = np.zeros(len(padded), dtype=np.float32)
+    window_sq = window * window
+    for i in range(n_frames):
+        win_sum[i * hop: i * hop + n_fft] += window_sq
+    win_sum = _safe_win_sum(win_sum)
+
+    def _istft(mask):
         out = np.zeros(len(padded), dtype=np.float32)
-        win_sum = np.zeros(len(padded), dtype=np.float32)
-        frames = np.fft.irfft(masked_spec, n=n_fft, axis=1).astype(np.float32) * window
-        for i in range(n_frames):
-            out[i * hop: i * hop + n_fft] += frames[i]
-            win_sum[i * hop: i * hop + n_fft] += window ** 2
-        return (out / _safe_win_sum(win_sum))[: len(y)]
+        for start in range(0, n_frames, block):
+            stop = min(start + block, n_frames)
+            frames = np.fft.irfft(spec[start:stop] * mask[start:stop], n=n_fft, axis=1)
+            frames = frames.astype(np.float32) * window
+            for i in range(start, stop):
+                out[i * hop: i * hop + n_fft] += frames[i - start]
+        out /= win_sum
+        return out[: len(y)]
 
-    return _istft(spec * mask_h), _istft(spec * mask_p)
+    return _istft(mask_h), _istft(mask_p)
 
 
 def _median_filter_1d(mat: np.ndarray, size: int, axis: int) -> np.ndarray:

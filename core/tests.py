@@ -583,7 +583,7 @@ class CabinetTests(TestCase):
         self.assertContains(response, "Кавер от нейросети")
         self.assertEqual([s.name for s in response.context["stems"]], ["bass"],
                          "кавер не должен дублироваться в списке дорожек")
-        self.assertContains(response, "Дорожек и табов из него не")
+        self.assertContains(response, "renders/cover.mp3", msg_prefix="плеер кавера")
 
     def test_render_detail_is_private(self):
         from .models import Project, RenderJob, Track, User
