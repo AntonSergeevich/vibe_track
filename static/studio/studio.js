@@ -104,11 +104,39 @@
     $('#track-chip').classList.add('hidden');
     dropzone.classList.remove('hidden');
     $('#file').value = '';
-    state.track = null; state.job = null;
+    state.track = null;
+    clearResult();
     forget();
   });
 
+  /* Новый трек — чистый лист. Оставленные на странице дорожки и аккорды от
+     прошлого трека путают сильнее, чем пустой экран: человек слушает старое
+     и думает, что это результат нового. */
+  function clearResult() {
+    clearInterval(state.poll);
+    state.poll = null;
+    state.job = null;
+
+    document.querySelectorAll('#step-result audio, #step-vocal audio')
+      .forEach((el) => { el.pause(); el.removeAttribute('src'); el.load(); });
+
+    $('#step-result').classList.add('hidden');
+    $('#step-vocal').classList.add('hidden');
+    $('#progress').classList.add('hidden');
+    $('#stems').innerHTML = '';
+    $('#warnings').innerHTML = '';
+    $('#analysis').innerHTML = '';
+    $('#score-nav').innerHTML = '';
+    $('#score-view').textContent = '';
+    $('#master-dl').removeAttribute('href');
+    $('#cover-dl').removeAttribute('href');
+    $('#cover-box').classList.add('hidden');
+    $('#run').disabled = false;
+    setProgress(0, 'queued');
+  }
+
   function upload(file) {
+    clearResult();
     const box = $('#upload-progress');
     const bar = box.querySelector('.bar span');
     box.classList.remove('hidden');
@@ -202,6 +230,7 @@
   /* ------------------------------------------------------------ рендер */
   $('#run').addEventListener('click', async () => {
     if (!state.track) return;
+    clearResult();                       // повторный рендер того же трека — тоже с нуля
     $('#run').disabled = true;
     $('#progress').classList.remove('hidden');
     setProgress(1, 'queued');
@@ -275,7 +304,16 @@
       `Длина <b>${Math.round(a.duration || 0)} с</b>`,
     ].map((t) => `<span>${t}</span>`).join('');
 
-    $('#stems').innerHTML = (job.stems || []).map((s) => `
+    // кавер — главный результат, ему отдельное место, а не строка среди дорожек
+    const stems = job.stems || [];
+    const cover = stems.find((s) => s.name === 'cover');
+    $('#cover-box').classList.toggle('hidden', !cover);
+    if (cover) {
+      $('#cover').src = cover.file_url;
+      $('#cover-dl').href = cover.file_url;
+    }
+
+    $('#stems').innerHTML = stems.filter((s) => s !== cover).map((s) => `
       <div class="stem">
         <div><div class="name">${s.label || s.name}</div>
              <div class="lvl">${s.rms_db ?? '—'} dB RMS</div></div>

@@ -492,6 +492,25 @@ class CabinetTests(TestCase):
         self.assertContains(response, "Таб: guitar_rhythm")
         self.assertContains(response, "D major")
 
+    def test_cover_gets_its_own_block(self):
+        """Кавер — главный результат, его нельзя прятать среди дорожек."""
+        from .models import Project, RenderJob, Stem, Track
+
+        project = Project.objects.create(owner=self.user, title="Мои треки")
+        track = Track.objects.create(project=project, title="Трек с кавером")
+        job = RenderJob.objects.create(track=track, status=RenderJob.STATUS_DONE)
+        Stem.objects.create(job=job, name="cover", label="Кавер от нейросети",
+                            file="renders/cover.mp3", source="generated")
+        Stem.objects.create(job=job, name="bass", label="Бас", file="stems/b.wav")
+
+        self.client.force_login(self.user)
+        response = self.client.get(f"/cabinet/track/{job.pk}/")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "Кавер от нейросети")
+        self.assertEqual([s.name for s in response.context["stems"]], ["bass"],
+                         "кавер не должен дублироваться в списке дорожек")
+        self.assertContains(response, "Дорожек и табов из него не")
+
     def test_render_detail_is_private(self):
         from .models import Project, RenderJob, Track, User
 

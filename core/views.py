@@ -87,10 +87,15 @@ def render_detail(request, pk: int):
         for name, tab in (score.tabs or {}).items():
             sheets[f'Таб: {name}'] = tab
 
+    stems = list(job.stems.all())
+    # кавер — главный результат, а не одна из десяти дорожек: показываем его
+    # отдельным блоком вверху, иначе человек его просто не найдёт
+    cover = next((s for s in stems if s.name == 'cover'), None)
     return render(request, 'studio/render_detail.html', {
         'job': job,
         'analysis': (job.result or {}).get('analysis', {}),
-        'stems': job.stems.all(),
+        'cover': cover,
+        'stems': [s for s in stems if s is not cover],
         'sheets': sheets,
         'takes': job.vocal_takes.all()[:10],
     })
