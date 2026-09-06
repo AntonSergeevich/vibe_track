@@ -175,6 +175,15 @@ CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = int(os.getenv('CELERY_TASK_TIME_LIMIT', 3600))
 CELERY_WORKER_MAX_TASKS_PER_CHILD = 8   # рендер держит память — перезапускаем воркер
+# Ход рендера мы храним в базе (RenderJob.progress) и оттуда же показываем.
+# Хранилище результатов Celery при этом не нужно, а подписка на него —
+# лишний повод упасть, если Redis недоступен.
+CELERY_TASK_IGNORE_RESULT = True
+# Не пытаться публиковать задачу минуту, если брокера нет: лучше сразу
+# получить ошибку и уйти в фоновый поток, чем держать пользователя в ожидании
+CELERY_TASK_PUBLISH_RETRY = False
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = False
+CELERY_BROKER_TRANSPORT_OPTIONS = {'socket_connect_timeout': 3, 'socket_timeout': 3}
 # Без брокера (локальная разработка, тесты) задачи выполняются синхронно
 CELERY_TASK_ALWAYS_EAGER = env_bool('CELERY_TASK_ALWAYS_EAGER', False)
 # Без Redis: выполнять задачи в фоновом потоке, чтобы работала полоса прогресса

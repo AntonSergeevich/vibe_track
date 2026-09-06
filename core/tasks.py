@@ -29,11 +29,23 @@ def enqueue(task, *args):
     не возвращается, пока рендер не закончится, поэтому браузеру нечего
     опрашивать и полоса прогресса стоит на месте. Поток решает это без
     Redis — ровно для локальной разработки.
+
+    Если брокер настроен, но недоступен, задача всё равно уходит в поток:
+    отсутствие Redis — повод посчитать медленнее, а не отдать пользователю
+    пятисотку на загруженный трек.
     """
     if getattr(settings, "VIBETRACK_INLINE_WORKER", False):
-        threading.Thread(target=_run_inline, args=(task, *args), daemon=True).start()
-        return None
-    return task.delay(*args)
+        return _run_in_thread(task, *args)
+    try:
+        return task.delay(*args)
+    except Exception as exc:  # noqa: BLE001 — брокер лежит, работа продолжается
+        logger.warning("Очередь недоступна (%s), считаю в фоновом потоке", exc)
+        return _run_in_thread(task, *args)
+
+
+def _run_in_thread(task, *args):
+    threading.Thread(target=_run_inline, args=(task, *args), daemon=True).start()
+    return None
 
 
 def _run_inline(task, *args) -> None:

@@ -345,6 +345,51 @@ class EnvFileTests(TestCase):
         load_env_file(Path("/nonexistent/.env"))
 
 
+class QueueFallbackTests(TestCase):
+    """Недоступный Redis не должен ронять загруженный трек."""
+
+    def test_task_runs_in_thread_when_broker_is_down(self):
+        import threading
+
+        from .tasks import enqueue
+
+        done = threading.Event()
+        seen = []
+
+        class _DeadQueue:
+            name = "core.tasks.render_track"
+
+            def delay(self, *args):
+                raise ConnectionError("Error 11001 connecting to redis:6379")
+
+            def __call__(self, *args):
+                seen.append(args)
+                done.set()
+
+        with override_settings(VIBETRACK_INLINE_WORKER=False):
+            self.assertIsNone(enqueue(_DeadQueue(), 42))
+        self.assertTrue(done.wait(5), "задача должна была уйти в фоновый поток")
+        self.assertEqual(seen, [(42,)])
+
+    def test_inline_worker_does_not_touch_the_queue(self):
+        import threading
+
+        from .tasks import enqueue
+
+        done = threading.Event()
+
+        class _Queue:
+            def delay(self, *args):
+                raise AssertionError("при включённом потоке очередь не нужна")
+
+            def __call__(self, *args):
+                done.set()
+
+        with override_settings(VIBETRACK_INLINE_WORKER=True):
+            enqueue(_Queue(), 1)
+        self.assertTrue(done.wait(5))
+
+
 class CoverLimitTests(TestCase):
     """Лимит генераций у внешней модели — он же защита от работы в минус."""
 
