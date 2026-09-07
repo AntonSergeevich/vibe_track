@@ -103,7 +103,8 @@ class StudioApiTests(TestCase):
             f"/api/tracks/{track_id}/transform/",
             {"prompt": "ню-метал в духе Korn, drop C, скретчи, женский вокал",
              "overrides": {"instruments": ["guitar_rhythm", "guitar_rhythm_r", "bass", "drums"]},
-             "options": {"manual_lyrics": "Первая строка\nВторая строка"}},
+             "options": {"manual_lyrics": "Первая строка\nВторая строка",
+                         "synth_arrangement": True}},
             content_type="application/json")
         self.assertEqual(response.status_code, 202, response.content)
 

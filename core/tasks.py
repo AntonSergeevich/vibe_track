@@ -71,7 +71,13 @@ STEM_LABELS = {
     "vocals_female": "Вокал (жен.)",
     "vocals_harmony": "Гармония",
     "source": "Исходник (подложка)",
-    "cover_vocals": "Кавер с вашим вокалом",
+    # дорожки, снятые с готового кавера
+    "cover_vocals": "Кавер: вокал",
+    "cover_drums": "Кавер: барабаны",
+    "cover_bass": "Кавер: бас",
+    "cover_other": "Кавер: остальное",
+    "cover_guitar": "Кавер: гитара",
+    "cover_piano": "Кавер: клавиши",
 }
 
 
@@ -100,6 +106,8 @@ def _engine_options(job: RenderJob) -> RenderOptions:
         use_llm=options.get("use_llm", True),
         samples_dir=str(getattr(settings, "VIBETRACK_SAMPLES_DIR", "")),
         generate_cover=options.get("generate_cover", False),
+        synth_arrangement=options.get("synth_arrangement", False),
+        split_cover=options.get("split_cover", True),
         lyrics_language=options.get("lyrics_language", "") or "",
     )
 

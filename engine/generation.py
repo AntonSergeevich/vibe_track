@@ -145,9 +145,9 @@ def stability_generate(request: CoverRequest, session=None) -> Audio:
                 files={"audio": fh},
                 data={
                     "prompt": request.style_prompt,
-                    # 0.35-0.45 — слышно исходную игру, выше 0.6 модель
-                    # начинает сочинять своё поверх одного лишь темпа
-                    "strength": os.getenv("VIBETRACK_STABILITY_STRENGTH", "0.45"),
+                    # 0.5-0.6 — проверено слухом на реальном материале:
+                    # инструменты уже звучат, а темп и форма ещё держатся
+                    "strength": os.getenv("VIBETRACK_STABILITY_STRENGTH", "0.55"),
                     "duration": duration,
                     "output_format": os.getenv("VIBETRACK_STABILITY_FORMAT", "mp3"),
                     # stable-audio-2 принимает только 30-100: меньше — отказ 400

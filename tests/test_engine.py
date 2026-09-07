@@ -218,7 +218,12 @@ class TestLyrics(EngineTestCase):
 
 
 class TestFullPipeline(EngineTestCase):
-    def test_transform_produces_stems_score_and_master(self):
+    def test_transform_gives_analysis_without_synthesising_a_band(self):
+        """По умолчанию синтеза нет: он не звучит группой и в релиз не годится.
+
+        Остаётся то, что действительно полезно: дорожки исходника, аккорды,
+        табы и текст.
+        """
         out_dir = os.path.join(self.tmp, "render")
         result = transform(self.track_path,
                            "ню-метал в духе Korn, drop C, скретчи, женский вокал в припеве",
@@ -226,12 +231,22 @@ class TestFullPipeline(EngineTestCase):
                            options=RenderOptions(manual_lyrics="Строка раз\nСтрока два",
                                                  separation_backend="dsp", use_llm=False))
         self.assertTrue(os.path.exists(result.master_path))
-        self.assertIn("guitar_rhythm", result.stem_paths)
-        self.assertIn("drums", result.stem_paths)
         self.assertIn("source_vocals", result.stem_paths)
-        self.assertTrue(result.tabs.get("guitar_rhythm"))
+        self.assertNotIn("guitar_rhythm", result.stem_paths,
+                         "синтезированные дорожки больше не отдаём")
+        self.assertTrue(result.tabs.get("guitar_rhythm"), "табы считаются без синтеза")
         self.assertIn("Строка раз", result.lyric_sheet)
         self.assertTrue(os.path.exists(os.path.join(out_dir, "score", "lyrics_chords.txt")))
+
+    def test_synth_arrangement_still_available_on_request(self):
+        """Старый путь никуда не делся — он просто не по умолчанию."""
+        out_dir = os.path.join(self.tmp, "render-synth")
+        result = transform(self.track_path, "ню-метал drop C", out_dir=out_dir,
+                           options=RenderOptions(separation_backend="dsp", use_llm=False,
+                                                 transcribe_lyrics=False,
+                                                 synth_arrangement=True))
+        self.assertIn("guitar_rhythm", result.stem_paths)
+        self.assertIn("drums", result.stem_paths)
         master = load(result.master_path)
         self.assertLessEqual(master.peak(), 1.0)
         self.assertAlmostEqual(master.duration, self.audio.duration, delta=4.0)

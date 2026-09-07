@@ -60,8 +60,10 @@
     load: 'Читаю файл', analyze: 'Определяю темп и тональность',
     separate: 'Разделяю на дорожки', transcribe: 'Распознаю текст',
     arrange: 'Собираю аранжировку', render: 'Играю инструменты',
-    vocals: 'Обрабатываю вокал', mix: 'Свожу микс', score: 'Пишу табы',
-    export: 'Сохраняю файлы', done: 'Готово', queued: 'В очереди',
+    vocals: 'Обрабатываю вокал', mix: 'Свожу микс',
+    cover: 'Нейросеть играет кавер', split: 'Раскладываю кавер на дорожки',
+    score: 'Пишу табы', export: 'Сохраняю файлы',
+    done: 'Готово', queued: 'В очереди',
   };
 
   async function request(path, { method = 'GET', body = null } = {}) {
@@ -236,6 +238,7 @@
           options: {
             manual_lyrics: $('#manual-lyrics').value,
             generate_cover: $('#want-cover').checked,
+            split_cover: $('#split-cover').checked,
           },
         },
       });
