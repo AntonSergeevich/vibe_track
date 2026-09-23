@@ -483,6 +483,33 @@ class _FakeSession:
         return _FakeHttpResponse({"status": status, "output": "https://cdn.test/result.mp3"})
 
 
+class _FakeRunPodSession:
+    """
+    JSON-only сервис вроде RunPod Serverless: тело запроса и ответа — JSON,
+    своего хостинга файлов нет, поэтому аудио едет и приходит base64-строкой,
+    а не multipart-формой и не ссылкой на скачивание.
+    """
+
+    def __init__(self, audio_bytes: bytes, statuses=("IN_QUEUE", "COMPLETED")):
+        import base64
+
+        self.audio_b64 = base64.b64encode(audio_bytes).decode("ascii")
+        self.statuses = list(statuses)
+        self.posts, self.gets = [], []
+
+    def post(self, url, headers=None, json=None, timeout=None):
+        self.posts.append({"url": url, "json": json})
+        return _FakeHttpResponse({"id": "job-1", "status": "IN_QUEUE"})
+
+    def get(self, url, headers=None, timeout=None):
+        self.gets.append(url)
+        status = self.statuses.pop(0) if len(self.statuses) > 1 else self.statuses[0]
+        payload = {"status": status}
+        if status == "COMPLETED":
+            payload["output"] = {"audio_base64": self.audio_b64}
+        return _FakeHttpResponse(payload)
+
+
 class TestGeneration(unittest.TestCase):
     """Подключение внешней нейросети-генератора."""
 
@@ -566,6 +593,65 @@ class TestGeneration(unittest.TestCase):
         data = {"output": {"files": [{"url": "https://cdn/x.mp3"}]}}
         self.assertEqual(_dig(data, "output.files.0.url"), "https://cdn/x.mp3")
         self.assertIsNone(_dig(data, "output.missing.url"))
+
+    def test_json_base64_transport_for_runpod_style_apis(self):
+        """
+        RunPod Serverless (и похожие) не принимают multipart и не хостят
+        файлы у себя: и запрос, и ответ — чистый JSON, аудио — base64
+        внутри тела. input_mode/output_mode переключают именно это, не
+        трогая остальную логику отправки и опроса статуса.
+        """
+        from engine.generation import CoverRequest, generate_cover
+
+        session = _FakeRunPodSession(self.audio_bytes)
+        config = {
+            "submit_url": "https://api.runpod.ai/v2/endpoint-id/run",
+            "status_url": "https://api.runpod.ai/v2/endpoint-id/status/{job_id}",
+            "poll_seconds": 0,
+            "input_mode": "json_base64",
+            "output_mode": "base64",
+            "wrap_input_key": "input",
+            "result_path": "output.audio_base64",
+            "done_values": ["COMPLETED"],
+            "failed_values": ["FAILED"],
+        }
+        with mock.patch.dict(os.environ, self._env(VIBETRACK_MUSIC_API_CONFIG=json.dumps(config))):
+            result = generate_cover(
+                CoverRequest(self.source_path, "aggressive nu metal", genre="nu_metal"),
+                session=session)
+
+        self.assertTrue(result.ok, result.error)
+        self.assertGreater(result.audio.duration, 1.0)
+        # Запрос ушёл целиком как JSON, обёрнутый в {"input": {...}} — не
+        # multipart-формой, как у классического REST.
+        body = session.posts[0]["json"]
+        self.assertIn("input", body)
+        self.assertEqual(body["input"]["prompt"], "aggressive nu metal")
+        self.assertIn("audio", body["input"], "исходный трек ушёл base64-строкой")
+        self.assertIsInstance(body["input"]["audio"], str)
+        # Скачивать по ссылке не должны были — аудио уже было в ответе.
+        self.assertFalse(any(url.endswith(".mp3") for url in session.gets))
+
+    def test_json_base64_reports_failure_from_status(self):
+        from engine.generation import CoverRequest, generate_cover
+
+        session = _FakeRunPodSession(self.audio_bytes, statuses=("FAILED",))
+        config = {
+            "submit_url": "https://api.runpod.ai/v2/endpoint-id/run",
+            "status_url": "https://api.runpod.ai/v2/endpoint-id/status/{job_id}",
+            "poll_seconds": 0,
+            "input_mode": "json_base64",
+            "output_mode": "base64",
+            "wrap_input_key": "input",
+            "result_path": "output.audio_base64",
+            "done_values": ["COMPLETED"],
+            "failed_values": ["FAILED"],
+        }
+        with mock.patch.dict(os.environ, self._env(VIBETRACK_MUSIC_API_CONFIG=json.dumps(config))):
+            result = generate_cover(CoverRequest(self.source_path, "nu metal"), session=session)
+
+        self.assertFalse(result.ok)
+        self.assertIn("FAILED", result.error)
 
 
 class _FakeStabilitySession:

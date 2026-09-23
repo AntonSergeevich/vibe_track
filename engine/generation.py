@@ -208,6 +208,11 @@ def _config() -> dict:
           "prompt_field": "prompt", "job_id_path": "id",
           "status_url": "https://.../{job_id}", "status_path": "status",
           "done_values": ["succeeded"], "result_path": "output.audio"}'
+
+    Для RunPod Serverless (и похожих JSON-only API без своего хостинга
+    файлов) добавляются input_mode/output_mode/wrap_input_key -- пример
+    целиком в .env.example, рядом с настоящими значениями полей ACE-Step
+    впишутся, когда будет развёрнут реальный endpoint и виден его ответ.
     """
     raw = os.getenv("VIBETRACK_MUSIC_API_CONFIG", "").strip()
     config = json.loads(raw) if raw else {}
@@ -216,11 +221,21 @@ def _config() -> dict:
     config.setdefault("prompt_field", "prompt")
     config.setdefault("job_id_path", "id")
     config.setdefault("status_path", "status")
-    config.setdefault("done_values", ["succeeded", "completed", "done", "complete"])
-    config.setdefault("failed_values", ["failed", "error", "canceled"])
+    config.setdefault("done_values", ["succeeded", "completed", "done", "complete",
+                                       "COMPLETED"])
+    config.setdefault("failed_values", ["failed", "error", "canceled", "FAILED"])
     config.setdefault("result_path", "output")
     config.setdefault("poll_seconds", 5)
     config.setdefault("timeout_seconds", 600)
+    # JSON-only сервисы вроде RunPod Serverless не принимают multipart и не
+    # хостят файлы у себя -- аудио едет и приходит base64-строкой прямо в
+    # теле, а не по отдельной ссылке. "input_mode"/"output_mode" переключают
+    # транспорт, не трогая опрос статуса и остальную логику.
+    config.setdefault("input_mode", "multipart")     # или "json_base64"
+    config.setdefault("output_mode", "url")           # или "base64"
+    # RunPod оборачивает тело запроса в {"input": {...}} -- у большинства
+    # остальных сервисов этого нет, поэтому по умолчанию не оборачиваем.
+    config.setdefault("wrap_input_key", "")
     if not config["submit_url"]:
         raise ProviderNotConfigured("Не задан адрес API генерации")
     return config
@@ -242,7 +257,16 @@ def _dig(data, path: str):
 
 
 def _http_generate(request: CoverRequest, session=None) -> Audio:
-    """Отправить → дождаться → скачать. Общая схема почти всех сервисов."""
+    """
+    Отправить → дождаться → скачать. Общая схема почти всех сервисов.
+
+    Два входных и два выходных режима (config["input_mode"]/["output_mode"]):
+    классический REST шлёт файл multipart-формой и отдаёт результат по
+    ссылке, а JSON-only сервисы вроде RunPod Serverless своих файлов не
+    хостят вовсе -- всё, включая исходное аудио и готовый кавер, едет
+    base64-строкой прямо внутри JSON. Опрос статуса и обработка ошибок от
+    этого не зависят и написаны один раз.
+    """
     import requests
 
     session = session or requests.Session()
@@ -261,23 +285,54 @@ def _http_generate(request: CoverRequest, session=None) -> Audio:
     }
     payload.update(json.loads(os.getenv("VIBETRACK_MUSIC_API_EXTRA", "{}") or "{}"))
 
-    with open(request.source_path, "rb") as fh:
-        response = session.post(config["submit_url"], headers=headers, data=payload,
-                                files={config["audio_field"]: fh}, timeout=120)
+    if config["input_mode"] == "json_base64":
+        import base64
+
+        with open(request.source_path, "rb") as fh:
+            payload[config["audio_field"]] = base64.b64encode(fh.read()).decode("ascii")
+        body = {config["wrap_input_key"]: payload} if config["wrap_input_key"] else payload
+        response = session.post(config["submit_url"], headers=headers, json=body, timeout=120)
+    else:
+        with open(request.source_path, "rb") as fh:
+            response = session.post(config["submit_url"], headers=headers, data=payload,
+                                    files={config["audio_field"]: fh}, timeout=120)
     response.raise_for_status()
     submitted = response.json()
 
-    result_url = _dig(submitted, config["result_path"])
-    if not result_url:                       # синхронного ответа не было — опрашиваем
-        result_url = _poll(session, headers, config, submitted)
+    audio_bytes = _extract_audio(submitted, config, session, headers)
+    if audio_bytes is None:                  # синхронного ответа не было — опрашиваем
+        audio_bytes = _poll(session, headers, config, submitted)
 
-    downloaded = session.get(result_url, headers=headers, timeout=300)
+    return _bytes_to_audio(audio_bytes)
+
+
+def _extract_audio(data: dict, config: dict, session, headers: dict) -> bytes | None:
+    """
+    Достать готовое аудио из ответа -- по ссылке или из base64 в теле.
+
+    None означает "результата тут нет" -- не ошибка, а сигнал опрашивать
+    статус дальше: у синхронных сервисов результат уже в первом ответе,
+    у асинхронных появится только когда задача досчитает.
+    """
+    value = _dig(data, config["result_path"])
+    if not value:
+        return None
+    if config["output_mode"] == "base64":
+        import base64
+
+        if isinstance(value, str) and value.startswith("data:") and "," in value:
+            value = value.split(",", 1)[1]    # data:audio/wav;base64,XXXX — срезаем префикс
+        return base64.b64decode(value)
+    downloaded = session.get(value, headers=headers, timeout=300)
     downloaded.raise_for_status()
+    return downloaded.content
 
+
+def _bytes_to_audio(data: bytes) -> Audio:
     import tempfile
 
     with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
-        tmp.write(downloaded.content)
+        tmp.write(data)
         tmp_path = tmp.name
     try:
         return load(tmp_path)
@@ -286,7 +341,7 @@ def _http_generate(request: CoverRequest, session=None) -> Audio:
             os.remove(tmp_path)
 
 
-def _poll(session, headers: dict, config: dict, submitted: dict) -> str:
+def _poll(session, headers: dict, config: dict, submitted: dict) -> bytes:
     job_id = _dig(submitted, config["job_id_path"])
     if job_id is None:
         raise RuntimeError(f"В ответе нет идентификатора задачи: {submitted}")
@@ -303,12 +358,12 @@ def _poll(session, headers: dict, config: dict, submitted: dict) -> str:
         status = str(_dig(data, config["status_path"]) or "").lower()
 
         if status in [s.lower() for s in config["failed_values"]]:
-            raise RuntimeError(f"Провайдер вернул статус «{status}»")
+            raise RuntimeError(f"Провайдер вернул статус «{status}»: {data}")
         if status in [s.lower() for s in config["done_values"]]:
-            url = _dig(data, config["result_path"])
-            if not url:
-                raise RuntimeError(f"Задача готова, но нет ссылки на результат: {data}")
-            return url
+            audio_bytes = _extract_audio(data, config, session, headers)
+            if audio_bytes is None:
+                raise RuntimeError(f"Задача готова, но нет результата: {data}")
+            return audio_bytes
         time.sleep(config["poll_seconds"])
     raise TimeoutError("Провайдер не ответил за отведённое время")
 
