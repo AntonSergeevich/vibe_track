@@ -1,0 +1,72 @@
+name: Живой тест генерации кавера
+
+# Идёт на серверах GitHub: у облачной сессии Claude исходящий доступ к
+# api.runpod.ai и api.stability.ai закрыт политикой сети. Запуск -- правкой
+# файла .github/music-test-request (в нём -- какой провайдер и сколько
+# секунд): workflow_dispatch работает только из ветки по умолчанию, а в
+# master эта работа не лежит. Результат -- аудио в артефактах прогона.
+on:
+  push:
+    paths: [".github/music-test-request"]
+
+jobs:
+  cover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      STABILITY_API_KEY: ${{ secrets.STABILITY_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Зависимости
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
+          pip install -q -r requirements.txt requests
+
+      - name: Что тестируем
+        run: |
+          cat .github/music-test-request
+          grep -E '^(provider|seconds)=' .github/music-test-request >> "$GITHUB_ENV"
+
+      - name: Эндпоинт ACE-Step на RunPod (создать, если нет)
+        if: env.provider == 'runpod'
+        run: python .github/runpod_endpoint.py
+
+      - name: Кавер через RunPod + ACE-Step
+        if: env.provider == 'runpod'
+        run: |
+          export VIBETRACK_MUSIC_PROVIDER=custom
+          export VIBETRACK_MUSIC_API_KEY="$RUNPOD_API_KEY"
+          export VIBETRACK_MUSIC_API_EXTRA='{"thinking": false}'
+          export VIBETRACK_MUSIC_API_CONFIG=$(python - <<'PY'
+          import json, os
+          e = os.environ["ENDPOINT_ID"]
+          print(json.dumps({
+              "submit_url": f"https://api.runpod.ai/v2/{e}/run",
+              "status_url": f"https://api.runpod.ai/v2/{e}/status/{{job_id}}",
+              "input_mode": "json_base64", "output_mode": "base64",
+              "wrap_input_key": "input", "audio_field": "audio_b64",
+              "prompt_field": "prompt", "result_path": "output.audio_b64",
+              "done_values": ["COMPLETED"], "failed_values": ["FAILED"],
+              "poll_seconds": 10, "timeout_seconds": 2400,
+          }))
+          PY
+          )
+          python manage.py check_music_api we_angel.mp3 --seconds "$seconds" --out cover_runpod.mp3
+
+      - name: Кавер через Stability
+        if: env.provider == 'stability'
+        run: |
+          export VIBETRACK_MUSIC_PROVIDER=stability
+          export VIBETRACK_MUSIC_API_KEY="$STABILITY_API_KEY"
+          python manage.py check_music_api we_angel.mp3 --seconds "$seconds" --out cover_stability.mp3
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cover-${{ github.run_number }}
+          path: cover_*.mp3
+          if-no-files-found: warn
