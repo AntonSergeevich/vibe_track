@@ -17,6 +17,9 @@ NAME = "vibetrack-acestep"
 IMAGE = "ghcr.io/quang101182/acestep-serverless:latest"
 GPUS = ["NVIDIA RTX A5000", "NVIDIA GeForce RTX 4090", "NVIDIA RTX A4500", "NVIDIA L4"]
 
+if not os.environ.get("RUNPOD_API_KEY"):
+    sys.exit("Секрет RUNPOD_API_KEY не задан в настройках репозитория "
+             "(Settings -> Secrets and variables -> Actions)")
 headers = {"Authorization": f"Bearer {os.environ['RUNPOD_API_KEY']}"}
 
 
