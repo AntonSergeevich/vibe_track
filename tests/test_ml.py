@@ -615,7 +615,8 @@ class TestGeneration(unittest.TestCase):
             "done_values": ["COMPLETED"],
             "failed_values": ["FAILED"],
         }
-        with mock.patch.dict(os.environ, self._env(VIBETRACK_MUSIC_API_CONFIG=json.dumps(config))):
+        with mock.patch.dict(os.environ, self._env(VIBETRACK_MUSIC_API_CONFIG=json.dumps(config))), \
+                mock.patch("engine.generation._mp3_for_json", return_value=b"ID3fake-mp3"):
             result = generate_cover(
                 CoverRequest(self.source_path, "aggressive nu metal", genre="nu_metal"),
                 session=session)
@@ -647,11 +648,38 @@ class TestGeneration(unittest.TestCase):
             "done_values": ["COMPLETED"],
             "failed_values": ["FAILED"],
         }
-        with mock.patch.dict(os.environ, self._env(VIBETRACK_MUSIC_API_CONFIG=json.dumps(config))):
+        with mock.patch.dict(os.environ, self._env(VIBETRACK_MUSIC_API_CONFIG=json.dumps(config))), \
+                mock.patch("engine.generation._mp3_for_json", return_value=b"ID3fake-mp3"):
             result = generate_cover(CoverRequest(self.source_path, "nu metal"), session=session)
 
         self.assertFalse(result.ok)
         self.assertIn("FAILED", result.error)
+
+    def test_json_body_over_limit_is_refused_before_sending(self):
+        """RunPod режет тело /run больше 10 МБ -- отказываем сами, понятным текстом."""
+        from engine.generation import CoverRequest, generate_cover
+
+        session = _FakeRunPodSession(self.audio_bytes)
+        config = {"submit_url": "https://api.runpod.ai/v2/e/run", "input_mode": "json_base64",
+                  "output_mode": "base64", "wrap_input_key": "input"}
+        with mock.patch.dict(os.environ, self._env(VIBETRACK_MUSIC_API_CONFIG=json.dumps(config))), \
+                mock.patch("engine.generation._mp3_for_json", return_value=b"x" * 8_000_000):
+            result = generate_cover(CoverRequest(self.source_path, "nu metal"), session=session)
+
+        self.assertFalse(result.ok)
+        self.assertIn("слишком длинный", result.error)
+        self.assertEqual(session.posts, [], "запрос не должен был уйти")
+
+    @unittest.skipUnless(__import__("shutil").which("ffmpeg"), "нужен ffmpeg")
+    def test_mp3_for_json_trims_to_duration(self):
+        from engine.audio_io import load
+        from engine.generation import CoverRequest, _mp3_for_json
+
+        data = _mp3_for_json(CoverRequest(self.source_path, "x", duration=1.0))
+        path = os.path.join(self.tmp, "trimmed.mp3")
+        with open(path, "wb") as fh:
+            fh.write(data)
+        self.assertAlmostEqual(load(path).duration, 1.0, delta=0.15)
 
 
 class _FakeStabilitySession:

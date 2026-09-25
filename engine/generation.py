@@ -288,8 +288,13 @@ def _http_generate(request: CoverRequest, session=None) -> Audio:
     if config["input_mode"] == "json_base64":
         import base64
 
-        with open(request.source_path, "rb") as fh:
-            payload[config["audio_field"]] = base64.b64encode(fh.read()).decode("ascii")
+        encoded = base64.b64encode(_mp3_for_json(request)).decode("ascii")
+        if len(encoded) > JSON_BODY_LIMIT:
+            raise RuntimeError(
+                f"Трек слишком длинный для отправки одним запросом: "
+                f"{len(encoded) / 1e6:.1f} МБ при пределе {JSON_BODY_LIMIT / 1e6:.0f} МБ. "
+                "Укоротите фрагмент (duration).")
+        payload[config["audio_field"]] = encoded
         body = {config["wrap_input_key"]: payload} if config["wrap_input_key"] else payload
         response = session.post(config["submit_url"], headers=headers, json=body, timeout=120)
     else:
@@ -304,6 +309,40 @@ def _http_generate(request: CoverRequest, session=None) -> Audio:
         audio_bytes = _poll(session, headers, config, submitted)
 
     return _bytes_to_audio(audio_bytes)
+
+
+# RunPod принимает тело /run не больше 10 МБ, а base64 раздувает файл на
+# треть. Держим запас: 9,5 МБ уже закодированного аудио.
+JSON_BODY_LIMIT = 9_500_000
+
+
+def _mp3_for_json(request: CoverRequest) -> bytes:
+    """
+    Аудио для JSON-запроса: обрезанное до duration, выровненное по
+    громкости и сжатое в mp3 192 кбит/с.
+
+    Отправлять исходный файл как есть нельзя: у JSON-only сервисов предел
+    размера тела (RunPod -- 10 МБ), и четырёхминутный WAV его превышает
+    втрое. mp3 192 кбит/с -- формат, который ждёт воркер ACE-Step.
+    """
+    import subprocess
+
+    from .audio_io import has_ffmpeg
+
+    if not has_ffmpeg():
+        raise RuntimeError("Для отправки аудио в JSON нужен ffmpeg (сжатие в mp3)")
+    seconds = request.duration or 10_000.0
+    wav = prepare_input(request.source_path, seconds)
+    mp3 = wav[:-4] + ".mp3"
+    try:
+        subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", wav, "-b:a", "192k", mp3],
+                       check=True, capture_output=True)
+        with open(mp3, "rb") as fh:
+            return fh.read()
+    finally:
+        for path in (wav, mp3):
+            if os.path.exists(path):
+                os.remove(path)
 
 
 def _extract_audio(data: dict, config: dict, session, headers: dict) -> bytes | None:

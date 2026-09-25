@@ -26,6 +26,11 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg
           pip install -q -r requirements.txt requests
 
+      # Сначала бесплатные проверки адаптера (здесь ffmpeg есть, в
+      # облачной сессии -- нет): сломанный код не должен тратить GPU.
+      - name: Проверки адаптера генерации
+        run: python manage.py test tests.test_ml.TestGeneration
+
       - name: Что тестируем
         run: |
           cat .github/music-test-request
