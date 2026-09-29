@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.env
+*.sqlite3
+media/
+# аудиосэмплы: своя лицензия, не место в репозитории
+samples/*
+!samples/README.md
+staticfiles/
+renders/
+.idea/
+.DS_Store
+.pytest_cache/
